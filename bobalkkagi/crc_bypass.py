@@ -21,6 +21,33 @@ import logging
 
 logger = logging.getLogger("Bobalkkagi.CRCBypass")
 
+# CRC补丁日志：记录所有被NOP的地址和原始字节，用于回滚
+CRC_PATCH_LOG = []  # [(address, original_bytes), ...]
+
+def get_crc_patch_log():
+    """获取所有CRC补丁记录，用于回滚"""
+    return list(CRC_PATCH_LOG)
+
+def clear_crc_patch_log():
+    """清空CRC补丁记录"""
+    CRC_PATCH_LOG.clear()
+
+def rollback_crc_patches(uc, boot_base):
+    """
+    回滚所有CRC补丁，恢复原始字节。
+    在脱壳失败或行为异常时调用。
+    """
+    count = 0
+    for addr, orig_bytes in CRC_PATCH_LOG:
+        try:
+            uc.mem_write(boot_base + addr, orig_bytes)
+            count += 1
+        except Exception as e:
+            logger.warning(f"CRC rollback failed @ 0x{boot_base + addr:x}: {e}")
+    CRC_PATCH_LOG.clear()
+    logger.info(f"CRC rollback: restored {count} patches")
+    return count
+
 try:
     from capstone import Cs, CS_ARCH_X86, CS_MODE_64
     HAS_CAPSTONE = True
@@ -102,12 +129,18 @@ def scan_and_patch_crc(data: bytearray, base_addr: int, section_va: int, section
                         jump_start = section_start + (last_cmp_addr - base_addr)
                         if jump_start < len(data):
                             jump_size = insn.size
+                            
+                            # Record original bytes for rollback
+                            addr_in_section = last_cmp_addr - (section_va - (base_addr & 0xFFFFFFFF))
+                            orig = bytes(data[jump_start:jump_start + jump_size])
+                            CRC_PATCH_LOG.append((addr_in_section, orig))
+                            
                             nop_patch = b'\x90' * jump_size
                             
                             if jump_start + jump_size <= len(data):
                                 data[jump_start:jump_start + jump_size] = nop_patch
                                 patches += 1
-                                logger.info(f"CRC bypass [{mode}] @ 0x{insn.address:x}: patched {mnemonic} to NOPs")
+                                logger.info(f"CRC bypass [{mode}] @ 0x{insn.address:x}: patched {mnemonic} to NOPs [recorded for rollback]")
                     
                     last_cmp_addr = 0
                     last_cmp_has_crc_context = False

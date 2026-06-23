@@ -137,10 +137,15 @@ crc_bypass_post_load(uc, themida, boot, image_base, mode='safe')
 
 1. **VM代码不可运行**: Themida的VM保护段(.themida)虽然被dump出来，但原始控制流经过VM化后无法直接执行。标注"Devirtualization(Not yet)"
 2. **IAT不完整**: 每个DLL只恢复了原始PE中可见的极少数函数（Themida隐藏了大部分）。完整IAT需要运行时扫描(Scylla-style)
-3. **CRC绕过**: 安全模式下可能漏过某些变形的CRC校验；激进模式可能误伤正常条件跳转
+3. **CRC绕过**: 
+   - 此模块为**启发式绕过**，可能**误伤**（破坏正常条件跳转）或**漏杀**（变形CRC校验逃逸扫描）
+   - 建议仅在**测试环境**使用
+   - 提供 `CRC_PATCH_LOG` 和 `rollback_crc_patches()` 回滚接口
 4. **单线程模型**: Unicorn只模拟单线程，Themida多线程保护（反调试线程等）未被处理
 5. **Windows版本依赖**: 需要win10_v1903 DLL目录，其他Windows版本可能不完全兼容
 6. **网络验证**: Themida的网络验证/注册机制未模拟，联网保护的程序需额外处理
+7. **非线程安全**: 使用全局状态(GLOBAL_VAR)，仅支持单进程单样本。不支持并发多实例
+8. **PE重建边界**: 对 `.themida` / `.boot` 等关键段的数据截断不会静默进行——超出文件范围的段会触发警告
 
 ```
 ntdll:

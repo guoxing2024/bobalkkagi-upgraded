@@ -300,8 +300,9 @@ class IATRebuilder:
         print(f"  可用空间: 0x{idata_sec['vsize']:x} ({idata_sec['vsize']} bytes)")
         
         if total_size > idata_sec['vsize']:
-            print(f"⚠  .idata空间不足，需扩展section")
-            # We'll still try to fit it in
+            print(f"❌ .idata空间不足: 需要0x{total_size:x}, 可用0x{idata_sec['vsize']:x}")
+            print(f"   建议: 增大.idata section或在PE中新增一个节存放IAT")
+            return False
         
         # Layout within .idata section:
         # [Import Descriptors] [DLL Names] [Hint/Name Table] [Thunks (INT)] [Thunks (IAT)]
