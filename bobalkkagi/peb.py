@@ -233,12 +233,19 @@ def Initpeb():
     peb.Mutant = -1
     peb.ImageBaseAddress = 0x140000000
     peb.Ldr= LdrBase
-    peb.ProcessParameters =  ProcessHeapBase + 0x1d50# 채워줘야함
+    peb.ProcessParameters =  ProcessHeapBase + 0x1d50
     peb.SubSystemData = 0x0
     peb.NtGlobalFlag = 0x0
     peb.ProcessHeap = ProcessHeapBase
     peb.CrossProcessFlags = 0x1
     peb.ActivationContextData = 0x400000
+    # 系统版本 (新版Themida读取PEB中的这些字段)
+    peb.OSMajorVersion = 10
+    peb.OSMinorVersion = 0
+    peb.OSBuildNumber = 18362
+    peb.OSPlatformId = 2          # VER_PLATFORM_WIN32_NT
+    peb.NumberOfProcessors = 4
+    peb.ActiveProcessAffinityMask = 0x0F  # 4 cores
     return peb
  
 

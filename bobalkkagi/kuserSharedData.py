@@ -123,7 +123,8 @@ class KUSER_SHARED_DATA(Structure):
 
 def InitKuserSharedData():
     kUserSharedData = KUSER_SHARED_DATA()
-    kUserSharedData.KdDebuggerEnabled = 0x01
+    # 关键：禁止显示调试器存在！
+    kUserSharedData.KdDebuggerEnabled = 0x00  # 原代码=0x01(错误!)
     kUserSharedData.MitigationPolicies = 0x0A
     kUserSharedData.XState.EnabledFeatures = 0xE7
     kUserSharedData.XState.ControlFlags = 0x3
@@ -135,4 +136,16 @@ def InitKuserSharedData():
     kUserSharedData.XState.AllFeatures[6] = 0x200
     kUserSharedData.XState.AllFeatures[7] = 0x400
     kUserSharedData.XState.AllFeatures[9] = 0x8
+    # 系统版本信息 (新版Themida依赖这些字段)
+    kUserSharedData.NtMajorVersion = 10      # Windows 10
+    kUserSharedData.NtMinorVersion = 0        
+    kUserSharedData.NtBuildNumber = 18362    # Win10 1903 
+    kUserSharedData.NtProductType = 1         # VER_NT_WORKSTATION
+    kUserSharedData.ActiveProcessorCount = 4
+    kUserSharedData.NumberOfPhysicalPages = 0x200000  # 2GB
+    kUserSharedData.SuiteMask = 0x100         # VER_SUITE_SINGLEUSERTS
+    kUserSharedData.NativeProcessorArchitecture = 0x0009  # PROCESSOR_ARCHITECTURE_AMD64
+    kUserSharedData.LargePageMinimum = 0x200000
+    kUserSharedData.QpcFrequency = 10000000   # 10MHz
+    kUserSharedData.Cookie = 0x12345678       # 随机cookie
     return kUserSharedData
