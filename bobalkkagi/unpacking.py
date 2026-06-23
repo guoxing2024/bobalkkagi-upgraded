@@ -12,6 +12,7 @@ from .kuserSharedData import InitKuserSharedData
 from .hookFuncs import HookFuncs
 from .constValue import *
 from .debugger import Debugger
+from .crc_bypass import crc_bypass_post_load
 
 import logging
 import struct
@@ -225,6 +226,12 @@ def unpack(program: str,  verbose: bool, mode:str, oep: bool):
     
     InsertHookFlag(uc)
     InvHookFuncDict()
+    
+    # Apply CRC integrity check bypass
+    if GLOBAL_VAR.themida and GLOBAL_VAR.boot:
+        crc_patches = crc_bypass_post_load(uc, GLOBAL_VAR.themida, GLOBAL_VAR.boot, GLOBAL_VAR.ImageBaseStart)
+    else:
+        crc_patches = 0
     
     print("\033[96m{0:=^100}\033[0m".format("[ Hook START ]"))
     

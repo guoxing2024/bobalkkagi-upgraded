@@ -21,6 +21,7 @@ class GLOBAL_VAR:
     queue_size = 20
     text = []
     themida = []
+    boot = []
 
 
 

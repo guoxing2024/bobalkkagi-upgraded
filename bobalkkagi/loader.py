@@ -159,6 +159,8 @@ def Section(uc, pe, base, oep):
         sectionName = str(section.Name, 'utf-8').replace(' ','').replace('\x00','')
         if sectionName == ".themida":
             GLOBAL_VAR.themida = [sectionName, base + section.VirtualAddress, section.Misc_VirtualSize, PrivChange(priv)]
+        if sectionName == ".boot":
+            GLOBAL_VAR.boot = [sectionName, base + section.VirtualAddress, section.Misc_VirtualSize, PrivChange(priv)]
         if oep:
             try:
                 priv, sectionName = RemoveEXEC(sectionName, section.Characteristics)
