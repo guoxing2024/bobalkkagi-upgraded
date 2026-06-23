@@ -22,6 +22,10 @@ from .pe_rebuilder import PERebuilder
 from .iat_rebuilder import IATRebuilder
 from .util import checkInput
 from . import api_recorder
+from .tracker.memory_tracker import MemoryTracker
+from .exception_engine import ExceptionEngine
+from .tracker.import_scanner import scan_and_reconstruct_iat, build_dll_export_map
+from .rebuild.tls_rebuilder import rebuild_tls
 
 BobLog = logging.getLogger("Bobalkkagi.Pipeline")
 
@@ -95,6 +99,30 @@ def unpack_full(protected_file, verbose='f', mode='f', dll_path="win10_v1903", o
         with open(dump_path, 'wb') as f:
             f.write(dump)
         
+        # ===== Phase 1.5: Import Scanning (Scylla-style) =====
+        print(f"\n{'='*60}")
+        print(f"  阶段 1.5: Thunk扫描IAT (Scylla-style)")
+        print(f"{'='*60}")
+        
+        scanner_iat = {}
+        if dll_path and os.path.isdir(dll_path):
+            scanner_iat = scan_and_reconstruct_iat(dump, GLOBAL_VAR.ImageBaseStart, dll_path, verbose=True)
+        else:
+            print(f"  [ImportScanner] DLL目录不存在: {dll_path}，跳过")
+        
+        # Merge: runtime_calls + scanner_iat + original PE (handled by IATRebuilder)
+        merged_runtime = {}
+        for dll, funcs in runtime_calls.items():
+            merged_runtime.setdefault(dll, []).extend(funcs)
+        for dll, funcs in scanner_iat.items():
+            merged_runtime.setdefault(dll, []).extend(funcs)
+        # Deduplicate
+        for dll in merged_runtime:
+            merged_runtime[dll] = list(set(merged_runtime[dll]))
+        
+        print(f"  合并后: {sum(len(v) for v in merged_runtime.values())}个函数, "
+              f"{len(merged_runtime)}个DLL")
+        
         # ===== Phase 2: PE rebuild =====
         print(f"\n{'='*60}")
         print(f"  阶段 2/3: PE 重建")
@@ -105,6 +133,15 @@ def unpack_full(protected_file, verbose='f', mode='f', dll_path="win10_v1903", o
         rebuilder.rebuild(oep=oep, verbose=False)
         
         print(f"  PE section headers 已修复")
+        
+        # TLS rebuild
+        try:
+            import pefile
+            orig_pe = pefile.PE(protected_file, fast_load=True)
+            if rebuild_tls(rebuilder.data, orig_pe, GLOBAL_VAR.ImageBaseStart):
+                print(f"  TLS 目录已恢复")
+        except Exception as e:
+            print(f"  TLS 恢复跳过: {e}")
         
         # ===== Phase 3: IAT rebuild =====
         print(f"\n{'='*60}")
@@ -124,7 +161,7 @@ def unpack_full(protected_file, verbose='f', mode='f', dll_path="win10_v1903", o
                 else:
                     print(f"    {dll}: {', '.join(funcs[:5])} ...({len(funcs)})")
         
-        iat = IATRebuilder(bytearray(rebuilder.data), protected_file, runtime_calls=runtime_calls)
+        iat = IATRebuilder(bytearray(rebuilder.data), protected_file, runtime_calls=merged_runtime)
         iat_success = iat.rebuild(verbose=False)
         
         if not iat_success:
