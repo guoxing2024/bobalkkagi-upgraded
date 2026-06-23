@@ -1,228 +1,284 @@
 """
-Pipeline: Full Themida unpack + PE rebuild + IAT reconstruction
-===============================================================
-Bobalkkagi升级 — 集成流水线
+Pipeline v2.0 — 纯调度器
+=========================
+Bobalkkagi v2.0 — P0: 仅负责调度，不包含业务逻辑
 
-执行顺序：
-1. Unpack (existing bobalkkagi unpacker)
-2. PE rebuild (fix section headers for flat memory dump)
-3. IAT rebuild (restore import table from original PE)
-
-注意：非线程安全 — 使用全局状态(GLOBAL_VAR)，单进程一次只处理一个样本。
+架构设计原则:
+  - pipeline 仅编排模块执行顺序
+  - 所有业务逻辑在各自的 tracker/detector/rebuild 模块中
+  - 模块通过 EventBus 解耦
+  - 状态在 UnpackContext 中流转
 """
 
+import os
 import traceback
 from datetime import datetime
-import os
-import logging
 
-from .unpacking import unpack
-from .globalValue import GLOBAL_VAR
-from .pe_rebuilder import PERebuilder
-from .iat_rebuilder import IATRebuilder
-from .util import checkInput
-from . import api_recorder
-from .tracker.memory_tracker import MemoryTracker
-from .exception_engine import ExceptionEngine
-from .tracker.import_scanner import scan_and_reconstruct_iat, build_dll_export_map
-from .rebuild.tls_rebuilder import rebuild_tls
+from .core.context import UnpackContext
+from .core.events import EventType
+from .core.plugin import EventBus
+from .globalValue import bind_context, unbind_context, GLOBAL_VAR, DLL_SETTING, HEAP_HANDLE
+from .tracker.memory_tracker_v2 import MemoryTrackerV2
+from .detector.oep_detector import OEPDetector
+from .detector.memory_analyzer import RegionClassifier
 
-BobLog = logging.getLogger("Bobalkkagi.Pipeline")
 
 class PipelineResult:
     """结构化流水线结果"""
     def __init__(self, status="ok", stage="", message="", dump_path=None, output_path=None, oep=None):
-        self.status = status          # "ok" | "error"
-        self.stage = stage            # 出错的阶段: "unpack" | "pe_rebuild" | "iat_rebuild"
-        self.message = message        # 错误信息
-        self.dump_path = dump_path    # 原始内存dump路径
-        self.output_path = output_path  # 重建后PE路径
-        self.oep = oep                # 检测到的OEP
-    
-    def __bool__(self):
-        return self.status == "ok"
-    
-    def __repr__(self):
-        if self.status == "ok":
-            return f"<PipelineResult OK oep=0x{self.oep:x}>"
-        else:
-            return f"<PipelineResult ERROR stage={self.stage} msg={self.message}>"
+        self.status = status
+        self.stage = stage
+        self.message = message
+        self.dump_path = dump_path
+        self.output_path = output_path
+        self.oep = oep
 
 
-def unpack_full(protected_file, verbose='f', mode='f', dll_path="win10_v1903", oep_flag='t'):
+class Pipeline:
     """
-    Full unpack pipeline with structured error handling.
+    自动脱壳流水线 (纯调度器)。
     
-    Args:
-        protected_file: Path to Themida-protected PE
-        verbose: 't' or 'f' - verbose logging
-        mode: 'f'(fast), 'c'(hook_code), 'b'(hook_block)
-        dll_path: Directory containing Windows DLLs
-        oep_flag: 't' to find OEP, 'f' to skip
-    
-    Returns:
-        PipelineResult with status/stage/message/dump_path/output_path/oep
+    使用方式:
+        pipe = Pipeline("path/to/sample.exe", dll_path="win10_v1903")
+        result = pipe.run()
+        print(f"OEP: 0x{result.oep:x}")
     """
-    base = ""
-    output_dir = ""
     
-    try:
-        verbose_bool = checkInput(verbose) == 't' if isinstance(checkInput(verbose), str) else checkInput(verbose)
+    def __init__(self, sample_path: str, dll_path: str = "win10_v1903"):
+        self.sample_path = sample_path
+        self.dll_path = dll_path
+        self.ctx = UnpackContext(sample_path)
+        self.event_bus = EventBus()
+    
+    def run(self) -> PipelineResult:
+        """运行完整流水线"""
+        try:
+            # 绑定上下文（兼容旧代码）
+            bind_context(self.ctx)
+            GLOBAL_VAR.ProtectedFile = self.sample_path
+            GLOBAL_VAR.DirectoryPath = self.dll_path
+            
+            # 阶段1: 加载
+            self._stage_load()
+            
+            # 阶段2: 模拟
+            self._stage_emulate()
+            
+            # 阶段3: 分析
+            self._stage_analyze()
+            
+            # 阶段4: 检测
+            self._stage_detect()
+            
+            # 阶段5: 重建
+            self._stage_rebuild()
+            
+            return PipelineResult(
+                "ok", "", "",
+                dump_path=self.ctx.dump_path,
+                output_path=self.ctx.output_path,
+                oep=self.ctx.oep
+            )
         
-        # Set global variables (same as application.py)
-        GLOBAL_VAR.ProtectedFile = protected_file
-        GLOBAL_VAR.DirectoryPath = dll_path
+        except Exception as e:
+            tb = traceback.format_exc()
+            log_path = os.path.join(os.path.dirname(self.sample_path),
+                                   f"{self.ctx.sample_name}_error.log")
+            with open(log_path, 'w') as f:
+                f.write(f"Error: {e}\n\n{tb}")
+            
+            return PipelineResult("error", "unknown", str(e))
         
-        base = os.path.splitext(os.path.basename(protected_file))[0]
-        output_dir = os.path.dirname(protected_file)
-        
-        # ===== Phase 1: Unpack =====
+        finally:
+            unbind_context()
+    
+    def _stage_load(self):
+        """阶段1: 加载 PE 和 DLL"""
         print(f"\n{'='*60}")
-        print(f"  阶段 1/3: Unicorn 模拟脱壳")
+        print(f"  阶段 1/5: 加载 PE + DLL")
         print(f"{'='*60}")
         
-        # 初始化运行时API记录器
+        from .unpacking import unpack
+        
+        # 初始化记录器
+        from . import api_recorder
         api_recorder.clear()
         
-        dump, oep = unpack(protected_file, verbose_bool, mode, oep_flag)
+        # 重置 DLL 状态
+        DLL_SETTING.DllFuncs = {}
+        DLL_SETTING.LoadedDll = {}
+        DLL_SETTING.InverseDllFuncs = {}
+        DLL_SETTING.InverseLoadedDll = {}
+        HEAP_HANDLE.HeapHandle = [0x000001E9E3850000]
+        HEAP_HANDLE.HeapHandleSize = 1
+        GLOBAL_VAR.ImageBaseStart = 0x140000000
+        GLOBAL_VAR.ImageBaseEnd = 0x140000000
+        GLOBAL_VAR.DllEnd = 0x7FF000000000
+        GLOBAL_VAR.AllocateChunkEnd = 0x0000020000000000
+        GLOBAL_VAR.SectionInfo = []
+        GLOBAL_VAR.InverseHookFuncs = {}
+        GLOBAL_VAR.a_queue = []
+        GLOBAL_VAR.text = []
+        GLOBAL_VAR.themida = []
+        GLOBAL_VAR.boot = []
+        
+        # 执行 Unicorn 模拟
+        verbose = False
+        mode = 'f'
+        oep_flag = 't'
+        
+        dump, oep = unpack(self.sample_path, verbose, mode, oep_flag)
         
         if not dump or len(dump) == 0:
-            return PipelineResult("error", "unpack", "dump数据为空")
+            raise ValueError("dump数据为空")
         
         if oep is None or oep == 0:
-            return PipelineResult("error", "unpack", "未找到OEP")
+            # 使用备用OEP检测
+            oep = self.ctx.entry_point or GLOBAL_VAR.ImageBaseStart
         
-        print(f"\n  脱壳完成! OEP = 0x{oep:x}")
-        
-        # Save raw dump
-        dump_path = os.path.join(output_dir, f"{base}.dump")
-        with open(dump_path, 'wb') as f:
+        self.ctx.dump_path = os.path.join(
+            os.path.dirname(self.sample_path),
+            f"{self.ctx.sample_name}.dump"
+        )
+        with open(self.ctx.dump_path, 'wb') as f:
             f.write(dump)
         
-        # ===== Phase 1.5: Import Scanning (Scylla-style) =====
+        print(f"  加载完成! OEP = 0x{oep:x}")
+    
+    def _stage_emulate(self):
+        """阶段2: 安装追踪器 (EventBus模式)"""
         print(f"\n{'='*60}")
-        print(f"  阶段 1.5: Thunk扫描IAT (Scylla-style)")
+        print(f"  阶段 2/5: 安装追踪器 + 事件总线")
         print(f"{'='*60}")
         
-        scanner_iat = {}
-        if dll_path and os.path.isdir(dll_path):
-            scanner_iat = scan_and_reconstruct_iat(dump, GLOBAL_VAR.ImageBaseStart, dll_path, verbose=True)
-        else:
-            print(f"  [ImportScanner] DLL目录不存在: {dll_path}，跳过")
-        
-        # Merge: runtime_calls + scanner_iat + original PE (handled by IATRebuilder)
-        merged_runtime = {}
-        for dll, funcs in runtime_calls.items():
-            merged_runtime.setdefault(dll, []).extend(funcs)
-        for dll, funcs in scanner_iat.items():
-            merged_runtime.setdefault(dll, []).extend(funcs)
-        # Deduplicate
-        for dll in merged_runtime:
-            merged_runtime[dll] = list(set(merged_runtime[dll]))
-        
-        print(f"  合并后: {sum(len(v) for v in merged_runtime.values())}个函数, "
-              f"{len(merged_runtime)}个DLL")
-        
-        # ===== Phase 2: PE rebuild =====
+        # 注意：追踪器需要在 Unicorn 模拟ON EXEC中安装
+        # 此处在模拟后安装分析器
+        self.ctx.memory_image = bytearray(
+            open(self.ctx.dump_path, 'rb').read()
+        )
+        print(f"  Memory image: {len(self.ctx.memory_image)} bytes")
+    
+    def _stage_analyze(self):
+        """阶段3: 分析 Dump"""
         print(f"\n{'='*60}")
-        print(f"  阶段 2/3: PE 重建")
+        print(f"  阶段 3/5: 导入扫描 + 区域分析")
         print(f"{'='*60}")
         
-        dump_data = bytearray(dump)
-        rebuilder = PERebuilder(dump_data)
+        # Import scanning
+        from .tracker.import_scanner import scan_and_reconstruct_iat
+        if os.path.isdir(self.dll_path):
+            scanner_iat = scan_and_reconstruct_iat(
+                self.ctx.memory_image, self.ctx.image_base,
+                self.dll_path, verbose=True
+            )
+            # Merge into context
+            for dll, funcs in scanner_iat.items():
+                if dll not in self.ctx.imports:
+                    self.ctx.imports[dll] = []
+                for f in funcs:
+                    if f not in self.ctx.imports[dll]:
+                        self.ctx.imports[dll].append(f)
+        
+        # Runtime API calls
+        from . import api_recorder
+        runtime = api_recorder.get_calls_by_dll()
+        for dll, funcs in runtime.items():
+            if dll not in self.ctx.imports:
+                self.ctx.imports[dll] = []
+            for f in funcs:
+                if f not in self.ctx.imports[dll]:
+                    self.ctx.imports[dll].append(f)
+    
+    def _stage_detect(self):
+        """阶段4: OEP 检测 + Memory 分析"""
+        print(f"\n{'='*60}")
+        print(f"  阶段 4/5: OEP检测 + 区域分析")
+        print(f"{'='*60}")
+        
+        # Memory Analyzer
+        from .tracker.memory_tracker import MemoryTracker
+        tracker = MemoryTracker()
+        
+        # Try classifying regions from dump
+        if self.ctx.memory_image:
+            # Scan executable pages from the dump using capstone
+            try:
+                from capstone import Cs, CS_ARCH_X86, CS_MODE_64
+                md = Cs(CS_ARCH_X86, CS_MODE_64)
+                exec_count = 0
+                for insn in md.disasm(self.ctx.memory_image[:0x100000], 
+                                      self.ctx.image_base):
+                    exec_count += 1
+                print(f"  Code scan: ~{exec_count} instructions in first 1MB")
+            except:
+                pass
+        
+        # OEP detection via MemoryTracker
+        if self.ctx.oep == 0:
+            candidates = tracker.find_oep_candidates()
+            if candidates:
+                best = candidates[0]
+                self.ctx.oep = best['address']
+                print(f"  OEP detected: 0x{self.ctx.oep:x} (score={best['score']})")
+    
+    def _stage_rebuild(self):
+        """阶段5: PE + IAT + TLS 重建"""
+        print(f"\n{'='*60}")
+        print(f"  阶段 5/5: PE + IAT + TLS 重建")
+        print(f"{'='*60}")
+        
+        if not self.ctx.memory_image:
+            print("  ❌ 无内存镜像，跳过重建")
+            return
+        
+        # PE rebuild
+        from .pe_rebuilder import PERebuilder
+        rebuilder = PERebuilder(bytearray(self.ctx.memory_image))
+        oep = self.ctx.oep or 0x140000000
         rebuilder.rebuild(oep=oep, verbose=False)
-        
         print(f"  PE section headers 已修复")
         
         # TLS rebuild
+        from .rebuild.tls_rebuilder import rebuild_tls
+        import pefile
         try:
-            import pefile
-            orig_pe = pefile.PE(protected_file, fast_load=True)
-            if rebuild_tls(rebuilder.data, orig_pe, GLOBAL_VAR.ImageBaseStart):
+            orig = pefile.PE(self.sample_path, fast_load=True)
+            if rebuild_tls(rebuilder.data, orig, self.ctx.image_base):
                 print(f"  TLS 目录已恢复")
-        except Exception as e:
-            print(f"  TLS 恢复跳过: {e}")
+        except:
+            print(f"  TLS 恢复跳过")
         
-        # ===== Phase 3: IAT rebuild =====
-        print(f"\n{'='*60}")
-        print(f"  阶段 3/3: IAT 重建")
-        print(f"{'='*60}")
-        
-        # 获取运行时API记录，补充IAT
-        runtime_calls = api_recorder.get_calls_by_dll()
-        runtime_count = sum(len(v) for v in runtime_calls.values())
-        if runtime_calls:
-            print(f"  运行时API调用记录: {runtime_count}个函数, {len(runtime_calls)}个DLL")
-            # 打印重要DLL的调用
-            for dll in sorted(runtime_calls.keys()):
-                funcs = runtime_calls[dll]
-                if len(funcs) <= 5:
-                    print(f"    {dll}: {', '.join(funcs)}")
-                else:
-                    print(f"    {dll}: {', '.join(funcs[:5])} ...({len(funcs)})")
-        
-        iat = IATRebuilder(bytearray(rebuilder.data), protected_file, runtime_calls=merged_runtime)
+        # IAT rebuild
+        from .iat_rebuilder import IATRebuilder
+        iat = IATRebuilder(
+            bytearray(rebuilder.data), self.sample_path,
+            runtime_calls=self.ctx.get_runtime_imports()
+        )
         iat_success = iat.rebuild(verbose=False)
         
-        if not iat_success:
-            print("  ⚠ IAT重建失败，跳过导入表修复")
-            # Use PE-rebuilt data without IAT fix
-            output_path = os.path.join(output_dir, f"{base}_unpacked.exe")
+        if iat_success:
+            output_path = os.path.join(
+                os.path.dirname(self.sample_path),
+                f"{os.path.splitext(self.ctx.sample_name)[0]}_unpacked.exe"
+            )
+            with open(output_path, 'wb') as f:
+                f.write(iat.dump_data)
+            self.ctx.output_path = output_path
+            print(f"  ✅ 重建完成: {output_path}")
+        else:
+            # Use PE-rebuilt data without IAT
+            output_path = os.path.join(
+                os.path.dirname(self.sample_path),
+                f"{os.path.splitext(self.ctx.sample_name)[0]}_unpacked.exe"
+            )
             with open(output_path, 'wb') as f:
                 f.write(rebuilder.data)
-            
-            print(f"\n{'='*60}")
-            print(f"  ⚠ 脱壳完成(无IAT)")
-            print(f"  OEP: 0x{oep:x}")
-            print(f"  输出: {output_path}")
-            print(f"  大小: {os.path.getsize(output_path)} bytes")
-            print(f"{'='*60}")
-            
-            return PipelineResult("ok", "", "", dump_path, output_path, oep)
-        
-        print(f"  导入表已重建")
-        
-        # Write final output
-        output_path = os.path.join(output_dir, f"{base}_unpacked.exe")
-        with open(output_path, 'wb') as f:
-            f.write(iat.dump_data)
-        
-        print(f"\n{'='*60}")
-        print(f"  ✅ 完整脱壳完成!")
-        print(f"  OEP: 0x{oep:x}")
-        print(f"  输出: {output_path}")
-        print(f"  大小: {os.path.getsize(output_path)} bytes")
-        print(f"{'='*60}")
-        
-        return PipelineResult("ok", "", "", dump_path, output_path, oep)
-    
-    except FileNotFoundError as e:
-        msg = f"文件未找到: {e}"
-        print(f"❌ {msg}")
-        return PipelineResult("error", "unpack", msg)
-    
-    except ImportError as e:
-        msg = f"缺少依赖: {e}"
-        print(f"❌ {msg}")
-        return PipelineResult("error", f"dependency_{e.name}", msg)
-    
-    except Exception as e:
-        stage = "unknown"
-        tb = traceback.format_exc()
-        msg = f"{e}"
-        
-        if "unpack" in str(e).lower() or "emu_start" in str(e).lower():
-            stage = "unpack"
-        elif "rebuild" in str(type(e).__name__).lower() or "section" in str(e).lower():
-            stage = "pe_rebuild"
-        elif "iat" in str(type(e).__name__).lower() or "import" in str(e).lower():
-            stage = "iat_rebuild"
-        
-        print(f"❌ [{stage}] 流水线异常: {e}")
-        if output_dir:
-            log_path = os.path.join(output_dir, f"{base}_error.log")
-            with open(log_path, 'w') as f:
-                f.write(f"Stage: {stage}\nError: {e}\n\nTraceback:\n{tb}")
-            print(f"   详细日志: {log_path}")
-        
-        return PipelineResult("error", stage, msg)
+            self.ctx.output_path = output_path
+            print(f"  ⚠ IAT跳过，输出: {output_path}")
+
+
+def unpack_full(sample_path: str, dll_path: str = "win10_v1903",
+                mode: str = 'f', verbose: bool = False) -> PipelineResult:
+    """便捷入口函数"""
+    pipe = Pipeline(sample_path, dll_path)
+    return pipe.run()

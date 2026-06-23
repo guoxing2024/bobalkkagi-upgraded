@@ -1,3 +1,13 @@
+"""
+Memory Tracker v2.0 — 事件总线集成版本
+=======================================
+"""
+
+from unicorn import UC_PROT_NONE
+from .memory_tracker import MemoryTracker
+from ..core.events import MemoryEvent
+from ..core.plugin import EventBus
+
 
 class MemoryTrackerV2(MemoryTracker):
     """
