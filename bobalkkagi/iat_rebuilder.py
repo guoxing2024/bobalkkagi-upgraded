@@ -399,8 +399,12 @@ class IATRebuilder:
         for imp_idx, imp in enumerate(self.orig_imports):
             desc_off = desc_file_off + imp_idx * SIZE_OF_IMPORT_DESCRIPTOR
             
-            # Write DLL name
-            dll_name_bytes = imp['dll'].encode('ascii') + b'\x00'
+            # Write DLL name with encoding safety
+            try:
+                dll_name_bytes = imp['dll'].encode('ascii') + b'\x00'
+            except UnicodeEncodeError:
+                dll_name_bytes = imp['dll'].encode('utf-8', errors='replace') + b'\x00'
+                logger.warning(f"Non-ASCII DLL name (using utf-8): {imp['dll']}")
             self.dump_data[curr_name_off:curr_name_off+len(dll_name_bytes)] = dll_name_bytes
             name_rva = base_rva + (curr_name_off - file_base)
             

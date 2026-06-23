@@ -71,10 +71,15 @@ def hook_api(uc, address, size, user_data):
     rsp=uc.reg_read(UC_X86_REG_RSP)
     rip=uc.reg_read(UC_X86_REG_RIP)
     try:
-        globals()["hook_"+GLOBAL_VAR.InverseHookFuncs[address-GLOBAL_VAR.HookRegion].split(".dll_")[1]](uc, BobLog, get_register(uc))
+        hook_name = GLOBAL_VAR.InverseHookFuncs[address-GLOBAL_VAR.HookRegion]
+        func_name = hook_name.split(".dll_")[1]
+        globals()["hook_"+func_name](uc, BobLog, get_register(uc))
     except KeyError as e:
-        BobLog.info("Not Found : "+str(e))
-        pass
+        BobLog.info("HOOK Not Found: "+str(e))
+    except Exception as e:
+        BobLog.error(f"HOOK Error in hook_api @ 0x{rip:x}: {e}")
+        # 不要静默吞异常，打印到控制台
+        print(f"  ⚠ hook_api error @ 0x{rip:x}: {e}")
     
 
 def hook_block(uc, address, size, user_data):
@@ -98,8 +103,10 @@ def hook_block(uc, address, size, user_data):
             if exitFlag == 1:
                 uc.emu_stop()
     except KeyError as e:
-        #BobLog.info("Not Found : "+str(e))
-        pass
+        BobLog.info("HOOK Not Found (block): "+str(e))
+    except Exception as e:
+        BobLog.error(f"HOOK Error in hook_block @ 0x{rip:x}: {e}")
+        print(f"  ⚠ hook_block error @ 0x{rip:x}: {e}")
 
     if GLOBAL_VAR.DebugFlag:
         GLOBAL_VAR.DebugFlag = Debugger(uc, BobLog)
@@ -132,8 +139,10 @@ def hook_code(uc, address, size, user_data):
             if exitFlag ==1:
                 uc.emu_stop()
     except KeyError as e:
-        #BobLog.info("Not Found : "+str(e))
-        pass
+        BobLog.info("HOOK Not Found (code): "+str(e))
+    except Exception as e:
+        BobLog.error(f"HOOK Error in hook_code @ 0x{rip:x}: {e}")
+        print(f"  ⚠ hook_code error @ 0x{rip:x}: {e}")
 
     if GLOBAL_VAR.DebugFlag:
         GLOBAL_VAR.DebugFlag = Debugger(uc, BobLog)

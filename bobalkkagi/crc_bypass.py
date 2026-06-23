@@ -64,23 +64,21 @@ CRC_RELATED_MNEMONICS = {
     'crc32',                          # x86 CRC32指令
 }
 
-def scan_and_patch_crc(data: bytearray, base_addr: int, section_va: int, section_size: int, mode: str = 'safe') -> int:
+def scan_and_patch_crc(data: bytearray, base_addr: int, section_va: int, section_size: int, mode: str = 'safe') -> dict:
     """
     Scan a memory section for CRC check patterns and patch them.
     
-    Args:
-        data: Section data
-        base_addr: Base address for disassembly
-        section_va: Section virtual address (unused, kept for compat)
-        section_size: Section size
-        mode: 'safe' (default) or 'aggressive'
-            safe: Only patch CMP+Jcc if there are CRC-related instructions nearby
-            aggressive: Patch ALL CMP+Jcc pairs within 10 bytes
-    
-    Returns: number of patches applied
+    Returns: {
+        "patches": int,     # 打补丁数
+        "completed": bool,   # 是否完整扫描
+        "error": str|None    # 错误信息
+    }
     """
+    result = {"patches": 0, "completed": False, "error": None}
+    
     if not HAS_CAPSTONE:
-        return 0
+        result["error"] = "capstone not available"
+        return result
     
     md = Cs(CS_ARCH_X86, CS_MODE_64)
     md.detail = True
@@ -89,73 +87,67 @@ def scan_and_patch_crc(data: bytearray, base_addr: int, section_va: int, section
     section_data = data[section_start:section_start + min(section_size, len(data) - section_start)]
     
     if len(section_data) < 16:
-        logger.warning(f"CRC scan: section data too small ({len(section_data)} bytes)")
-        return 0
+        result["error"] = f"section data too small ({len(section_data)} bytes)"
+        return result
     
     patches = 0
     last_cmp_addr = 0
     last_cmp_has_crc_context = False
-    
-    # Track recent instructions for CRC context detection
     recent_mnemonics = []
     
     try:
         for insn in md.disasm(section_data, base_addr + section_va):
             mnemonic = insn.mnemonic.lower()
+            # ... (rest of the loop logic continues below)
+
             recent_mnemonics.append(mnemonic)
             if len(recent_mnemonics) > 5:
                 recent_mnemonics.pop(0)
-            
-            # Track CMP instructions
+
             if mnemonic == 'cmp':
                 last_cmp_addr = insn.address
-                # Check if any recent instruction is CRC-related
                 last_cmp_has_crc_context = any(m in CRC_RELATED_MNEMONICS for m in recent_mnemonics)
                 continue
-            
-            # Check conditional jumps after CMP
+
             if mnemonic in ('jne', 'jne', 'jnz', 'jz', 'je', 'jb', 'jbe', 'ja', 'jae', 'jl', 'jle', 'jg', 'jge'):
                 if last_cmp_addr > 0 and (insn.address - last_cmp_addr) <= 10:
                     should_patch = False
-                    
                     if mode == 'aggressive':
-                        # Aggressive: patch all CMP+Jcc
                         should_patch = True
                     elif mode == 'safe':
-                        # Safe: only patch if CRC context detected
                         should_patch = last_cmp_has_crc_context
-                    
+
                     if should_patch:
                         jump_start = section_start + (last_cmp_addr - base_addr)
                         if jump_start < len(data):
                             jump_size = insn.size
-                            
-                            # Record original bytes for rollback
                             addr_in_section = last_cmp_addr - (section_va - (base_addr & 0xFFFFFFFF))
                             orig = bytes(data[jump_start:jump_start + jump_size])
                             CRC_PATCH_LOG.append((addr_in_section, orig))
-                            
                             nop_patch = b'\x90' * jump_size
-                            
                             if jump_start + jump_size <= len(data):
                                 data[jump_start:jump_start + jump_size] = nop_patch
                                 patches += 1
-                                logger.info(f"CRC bypass [{mode}] @ 0x{insn.address:x}: patched {mnemonic} to NOPs [recorded for rollback]")
-                    
+
                     last_cmp_addr = 0
                     last_cmp_has_crc_context = False
                 else:
                     last_cmp_addr = 0
                     last_cmp_has_crc_context = False
             else:
-                # Non-jump instruction resets CMP tracking
                 last_cmp_addr = 0
                 last_cmp_has_crc_context = False
-                
+
+        result["patches"] = patches
+        result["completed"] = True
+        return result
+
     except Exception as e:
-        logger.warning(f"CRC scan error: {e}")
-    
-    return patches
+        result["patches"] = patches
+        result["completed"] = False
+        result["error"] = str(e)
+        logger.warning(f"CRC scan error (partial={patches}): {e}")
+        return result
 
 
 def crc_bypass_post_load(uc, themida_section, boot_section, image_base, mode='safe'):
@@ -185,12 +177,17 @@ def crc_bypass_post_load(uc, themida_section, boot_section, image_base, mode='sa
             
         data = bytearray(code)
         
-        patches = scan_and_patch_crc(data, boot_base, 0, len(data), mode=mode)
-        if patches > 0:
+        result = scan_and_patch_crc(data, boot_base, 0, len(data), mode=mode)
+        if result["patches"] > 0:
             uc.mem_write(boot_base, bytes(data))
-            print(f"  [CRC] [{mode}] 已绕过 {patches} 个CRC检查点")
+            status = "完整扫描" if result["completed"] else "部分扫描"
+            print(f"  [CRC] [{mode}] {status}: 绕过 {result['patches']} 个CRC检查点")
+            if not result["completed"]:
+                print(f"  [CRC] ⚠ 扫描未完成: {result['error']}")
+        elif result["error"]:
+            print(f"  [CRC] 跳过: {result['error']}")
         
-        return patches
+        return result["patches"]
     except Exception as e:
         print(f"  [CRC] 绕过失败: {e}")
         return 0
