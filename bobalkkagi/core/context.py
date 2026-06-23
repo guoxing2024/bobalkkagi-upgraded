@@ -84,6 +84,32 @@ class UnpackContext:
         self.image_end: int = 0
         self.entry_point: int = 0
         self.section_count: int = 0
+        self.header_size: int = 0x1000
+        
+        # === 模拟环境 ===
+        self.dll_end: int = 0x7FF000000000  # 原 GLOBAL_VAR.DllEnd
+        self.hook_region: int = 0x7FF010000000  # 原 GLOBAL_VAR.HookRegion
+        self.allocate_chunk_end: int = 0x0000020000000000  # 原 GLOBAL_VAR.AllocateChunkEnd
+        self.directory_path: str = "win10_v1903"  # 原 GLOBAL_VAR.DirectoryPath
+        
+        # === 调试 ===
+        self.debug_option: bool = False     # 原 GLOBAL_VAR.DebugOption
+        self.debug_flag: bool = False       # 原 GLOBAL_VAR.DebugFlag
+        self.breakpoints: list = []         # 原 GLOBAL_VAR.BreakPoint
+        self.hook_int: int = 0              # Unicorn hook句柄
+        
+        # === Section追踪 ===
+        self.section_info: list = []        # 原 GLOBAL_VAR.SectionInfo
+        self.text_section: list = []        # 原 GLOBAL_VAR.text
+        self.themida_section: list = []     # 原 GLOBAL_VAR.themida
+        self.boot_section: list = []        # 原 GLOBAL_VAR.boot
+        
+        # === Hook系统 ===
+        self.inverse_hook_funcs: dict = {}  # 原 GLOBAL_VAR.InverseHookFuncs
+        
+        # === 日志队列 ===
+        self.log_queue: list = []           # 原 GLOBAL_VAR.a_queue
+        self.log_queue_size: int = 20       # 原 GLOBAL_VAR.queue_size
         
         # === 模块 ===
         self.modules: Dict[str, ModuleInfo] = {}

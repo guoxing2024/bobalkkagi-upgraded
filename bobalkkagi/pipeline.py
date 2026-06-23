@@ -17,7 +17,7 @@ from datetime import datetime
 from .core.context import UnpackContext
 from .core.events import EventType
 from .core.plugin import EventBus
-from .globalValue import bind_context, unbind_context, GLOBAL_VAR, DLL_SETTING, HEAP_HANDLE
+from .globalValue import set_context, get_context, DLL_SETTING, HEAP_HANDLE
 from .tracker.memory_tracker_v2 import MemoryTrackerV2
 from .detector.oep_detector import OEPDetector
 from .detector.memory_analyzer import RegionClassifier
@@ -54,9 +54,9 @@ class Pipeline:
         """运行完整流水线"""
         try:
             # 绑定上下文（兼容旧代码）
-            bind_context(self.ctx)
-            GLOBAL_VAR.ProtectedFile = self.sample_path
-            GLOBAL_VAR.DirectoryPath = self.dll_path
+            set_context(self.ctx)
+            ctx.sample_path = self.sample_path
+            ctx.directory_path = self.dll_path
             
             # 阶段1: 加载
             self._stage_load()
@@ -90,7 +90,7 @@ class Pipeline:
             return PipelineResult("error", "unknown", str(e))
         
         finally:
-            unbind_context()
+            set_context(None)
     
     def _stage_load(self):
         """阶段1: 加载 PE 和 DLL"""
@@ -111,16 +111,16 @@ class Pipeline:
         DLL_SETTING.InverseLoadedDll = {}
         HEAP_HANDLE.HeapHandle = [0x000001E9E3850000]
         HEAP_HANDLE.HeapHandleSize = 1
-        GLOBAL_VAR.ImageBaseStart = 0x140000000
-        GLOBAL_VAR.ImageBaseEnd = 0x140000000
-        GLOBAL_VAR.DllEnd = 0x7FF000000000
-        GLOBAL_VAR.AllocateChunkEnd = 0x0000020000000000
-        GLOBAL_VAR.SectionInfo = []
-        GLOBAL_VAR.InverseHookFuncs = {}
-        GLOBAL_VAR.a_queue = []
-        GLOBAL_VAR.text = []
-        GLOBAL_VAR.themida = []
-        GLOBAL_VAR.boot = []
+        ctx.image_base = 0x140000000
+        ctx.image_end = 0x140000000
+        ctx.dll_end = 0x7FF000000000
+        ctx.allocate_chunk_end = 0x0000020000000000
+        ctx.section_info = []
+        ctx.inverse_hook_funcs = {}
+        ctx.log_queue = []
+        ctx.text_section = []
+        ctx.themida_section = []
+        ctx.boot_section = []
         
         # 执行 Unicorn 模拟
         verbose = False
@@ -134,7 +134,7 @@ class Pipeline:
         
         if oep is None or oep == 0:
             # 使用备用OEP检测
-            oep = self.ctx.entry_point or GLOBAL_VAR.ImageBaseStart
+            oep = self.ctx.entry_point or ctx.image_base
         
         self.ctx.dump_path = os.path.join(
             os.path.dirname(self.sample_path),

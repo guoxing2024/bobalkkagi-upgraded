@@ -2,7 +2,7 @@ from unicorn import *
 from unicorn.x86_const import *
 from capstone import Cs, CS_ARCH_X86, CS_MODE_64
 
-from .globalValue import get_queue, GLOBAL_VAR
+from .globalValue import get_queue
 from .util import IsReadable
 
 import logging
@@ -53,7 +53,7 @@ def setup_logger(uc, logger: logging.Logger, verbose:bool) -> None:
     # Save log file
     if not os.path.isdir('log'):
         os.mkdir('log')
-    logFile = os.path.splitext(os.path.basename(GLOBAL_VAR.ProtectedFile))[0] + '_log.txt'
+    logFile = os.path.splitext(os.path.basename(ctx.sample_path))[0] + '_log.txt'
     fileHandler = logging.FileHandler(f"log\\{logFile}")
     logger.addHandler(fileHandler)
 

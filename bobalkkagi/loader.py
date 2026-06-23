@@ -2,7 +2,7 @@ from unicorn import *
 from unicorn.x86_const import *
 from pathlib import Path
 
-from .globalValue import DLL_SETTING, GLOBAL_VAR
+from .globalValue import DLL_SETTING
 from .constValue import PRIVILEGE, RTL
 from .reflector import REFLECTOR
 from .util import align
@@ -41,7 +41,7 @@ def PE_Loader(uc, fileName, base, oep: bool = False) -> None: #
         alignHeaderSize = align(len(pe.header)) 
         uc.mem_map(base, alignHeaderSize, UC_PROT_READ)
         uc.mem_write(base, pe.header)
-        GLOBAL_VAR.SectionInfo.append(["header", base, 0x1000, 0x2]) # header
+        ctx.section_info.append(["header", base, 0x1000, 0x2]) # header
         base += alignHeaderSize
        
         sectionSize, sectionInfo = Section(uc, pe, originBase, oep)
@@ -52,7 +52,7 @@ def PE_Loader(uc, fileName, base, oep: bool = False) -> None: #
 
         pe.parse_data_directories()
         if dllFlag:
-            GLOBAL_VAR.DllEnd = base
+            ctx.dll_end = base
             for entry in pe.DIRECTORY_ENTRY_EXPORT.symbols:
                 if entry.name:
                     dllFunction = entry.name.decode('utf-8')
@@ -64,7 +64,7 @@ def PE_Loader(uc, fileName, base, oep: bool = False) -> None: #
                 except:
                     pass
         else:
-            GLOBAL_VAR.ImageBaseEnd = base
+            ctx.image_end = base
 
         Insert_IAT(uc, pe, originBase) #
 
@@ -96,7 +96,7 @@ def Insert_IAT(uc, pe, base):
 
         
         if dll.lower() not in DLL_SETTING.LoadedDll:
-            PE_Loader(uc, dll, GLOBAL_VAR.DllEnd)
+            PE_Loader(uc, dll, ctx.dll_end)
     
         peDataLen = len(pe.__data__) - file_offset
         dllnames_only=False 
@@ -139,7 +139,7 @@ def Insert_IAT(uc, pe, base):
 
 def GetDLLPath(dll:str)->str:
     dllPath = ""
-    for path, dirs, files in os.walk(GLOBAL_VAR.DirectoryPath):
+    for path, dirs, files in os.walk(ctx.directory_path):
         for file in files:
             if file.lower() == dll.lower():
                 dllPath = os.path.join(path, file)
@@ -158,23 +158,23 @@ def Section(uc, pe, base, oep):
         code = section.get_data()
         sectionName = str(section.Name, 'utf-8').replace(' ','').replace('\x00','')
         if sectionName == ".themida":
-            GLOBAL_VAR.themida = [sectionName, base + section.VirtualAddress, section.Misc_VirtualSize, PrivChange(priv)]
+            ctx.themida_section = [sectionName, base + section.VirtualAddress, section.Misc_VirtualSize, PrivChange(priv)]
         if sectionName == ".boot":
-            GLOBAL_VAR.boot = [sectionName, base + section.VirtualAddress, section.Misc_VirtualSize, PrivChange(priv)]
+            ctx.boot_section = [sectionName, base + section.VirtualAddress, section.Misc_VirtualSize, PrivChange(priv)]
         if oep:
             try:
                 priv, sectionName = RemoveEXEC(sectionName, section.Characteristics)
-                GLOBAL_VAR.text = [section.VirtualAddress, align(section.Misc_VirtualSize, pe.OPTIONAL_HEADER.SectionAlignment)]
+                ctx.text_section = [section.VirtualAddress, align(section.Misc_VirtualSize, pe.OPTIONAL_HEADER.SectionAlignment)]
             except:
                 priv = RemoveEXEC(sectionName, section.Characteristics)
             
             info.append([section.Name,base+section.VirtualAddress, align(section.Misc_VirtualSize, pe.OPTIONAL_HEADER.SectionAlignment), PRIVILEGE[priv]])
             uc.mem_map(base+section.VirtualAddress, align(section.Misc_VirtualSize, pe.OPTIONAL_HEADER.SectionAlignment) , PRIVILEGE[priv])
-            GLOBAL_VAR.SectionInfo.append([sectionName, base + section.VirtualAddress, section.Misc_VirtualSize, PrivChange(priv)])
+            ctx.section_info.append([sectionName, base + section.VirtualAddress, section.Misc_VirtualSize, PrivChange(priv)])
         else:
             info.append([section.Name,base+section.VirtualAddress,align(section.Misc_VirtualSize, pe.OPTIONAL_HEADER.SectionAlignment),PRIVILEGE[section.Characteristics >>28]])
             uc.mem_map(base+section.VirtualAddress, align(section.Misc_VirtualSize, pe.OPTIONAL_HEADER.SectionAlignment) , PRIVILEGE[section.Characteristics >>28])
-            GLOBAL_VAR.SectionInfo.append([sectionName, base + section.VirtualAddress, section.Misc_VirtualSize, PrivChange(section.Characteristics >>28)])
+            ctx.section_info.append([sectionName, base + section.VirtualAddress, section.Misc_VirtualSize, PrivChange(section.Characteristics >>28)])
 
         uc.mem_write(base+section.VirtualAddress, code)
         totalSize += align(section.Misc_VirtualSize, pe.OPTIONAL_HEADER.SectionAlignment)

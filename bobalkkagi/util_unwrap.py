@@ -5,7 +5,7 @@ from unicorn.x86_const import *
 from distorm3 import Decode, Decode64Bits
 from dataclasses import dataclass
 
-from .globalValue import DLL_SETTING, GLOBAL_VAR
+from .globalValue import DLL_SETTING
 from .util import saveDumpfile, align
 from .constValue import *
 
@@ -122,7 +122,7 @@ def PEinfo(func, variable):
     pesignature=readDword(peoffset+0x00) # PE signature
 
     sections_num=readWord(peoffset+0x06) # File Hdr. sections count
-    imagebase = GLOBAL_VAR.ImageBaseStart
+    imagebase = ctx.image_base
     writeLword(peoffset+0x30,imagebase)
     sectionAlignment=readDword(peoffset+0x38) # Optional Hdr. Section Alignment
 
@@ -241,7 +241,7 @@ def Injection_call(new_virtualAddress):
             operand = readDword(call_offset+0x1)
             operand_virtualaddr = call_virtualrip + operand + 0x5
             operand_offset = operand_virtualaddr - imagebase
-            if(GLOBAL_VAR.ImageBaseStart <= operand_virtualaddr and operand_virtualaddr <= GLOBAL_VAR.ImageBaseEnd):
+            if(ctx.image_base <= operand_virtualaddr and operand_virtualaddr <= ctx.image_end):
                 callnext_jmp[operand_offset] = len(callnext_jmp)
                 writeWord(operand_offset, 0x15ff)
                 writeDword(operand_offset+0x2, call_virtualvia - operand_virtualaddr - 0x6)
@@ -356,9 +356,9 @@ def hook_mem_write_unmapped(uc, access, address, size, value, user_data):
 def hooking_code(uc, address, size, user_data):
     global count
     
-    if not (GLOBAL_VAR.themida[1] <= address and address < (GLOBAL_VAR.themida[1]+GLOBAL_VAR.themida[2])):
+    if not (ctx.themida_section[1] <= address and address < (ctx.themida_section[1]+ctx.themida_section[2])):
         count += 1
-    elif count >= 1 and GLOBAL_VAR.themida[1] <= address and address < (GLOBAL_VAR.themida[1]+GLOBAL_VAR.themida[2]):
+    elif count >= 1 and ctx.themida_section[1] <= address and address < (ctx.themida_section[1]+ctx.themida_section[2]):
         count = 0
     if count >=4:
         count = 0
@@ -444,7 +444,7 @@ def call_emulate_rip(uc, rip):
 
     try:
         # imagebase + rip (call offset start)
-        uc.emu_start(GLOBAL_VAR.ImageBaseStart + rip, GLOBAL_VAR.ImageBaseStart +rip+ 0x20000)
+        uc.emu_start(ctx.image_base + rip, ctx.image_base +rip+ 0x20000)
         uc.hook_del(hookint2)
         uc.hook_del(hookint)
     except UcError as e:
@@ -477,7 +477,7 @@ def jmp_emulate_rip(uc, rip):
 
     try:
         # imagebase + rip (call rip start)
-        uc.emu_start(GLOBAL_VAR.ImageBaseStart + rip, GLOBAL_VAR.ImageBaseStart +rip+ 0x20000)
+        uc.emu_start(ctx.image_base + rip, ctx.image_base +rip+ 0x20000)
         uc.hook_del(hookint2)
         uc.hook_del(hookint)
     except UcError as e:
@@ -510,7 +510,7 @@ def check_jmp_Instruction(rip):
     try:
         offset = readDword(rip + 3)
         address = readLword(offset + rip+ 7)
-        if GLOBAL_VAR.themida[1] <= address and address < (GLOBAL_VAR.themida[1]+GLOBAL_VAR.themida[2]):
+        if ctx.themida_section[1] <= address and address < (ctx.themida_section[1]+ctx.themida_section[2]):
             jmp_addrfunc[rip] = None
     except :
         pass
@@ -559,7 +559,7 @@ def emulate_start():
             #api_count[dllName]= 1
 
 def pattern_target():
-    assem = Decode(GLOBAL_VAR.text[0], origin_data[GLOBAL_VAR.text[0]:GLOBAL_VAR.text[0]+GLOBAL_VAR.text[1]], Decode64Bits)
+    assem = Decode(ctx.text_section[0], origin_data[ctx.text_section[0]:ctx.text_section[0]+ctx.text_section[1]], Decode64Bits)
 
     for asm in assem:
         if asm[2].split(" ")[0] == "CALL":
@@ -599,7 +599,7 @@ def unwrapping(dump, OEP:int):
         Injection_mov(new_rawAddress)
         Injection_jmp(new_rawAddress)
 
-        dumpFileName = 'unwrap_'+GLOBAL_VAR.ProtectedFile.split('\\')[-1].split('.')[0] + '.dump'
+        dumpFileName = 'unwrap_'+ctx.sample_path.split('\\')[-1].split('.')[0] + '.dump'
         
         saveDumpfile(dumpFileName, origin_data)
         

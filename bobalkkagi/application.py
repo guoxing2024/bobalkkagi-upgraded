@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from .unpacking import unpack
-from .globalValue import GLOBAL_VAR
+from .globalValue import set_context
 from .unwrapping import unwrap
 from .util import checkInput
 
@@ -43,9 +43,9 @@ def run_Bobalkkagi(
     oep = checkInput(oep)
     debugger =checkInput(debugger)
     
-    GLOBAL_VAR.DebugOption = debugger
-    GLOBAL_VAR.ProtectedFile = protectedFile
-    GLOBAL_VAR.DirectoryPath = dllPath
+    ctx.debug_option = debugger
+    ctx.sample_path = protectedFile
+    ctx.directory_path = dllPath
 
     dump, OrignalEntryPoint = unpack(protectedFile, verbose, mode, oep)
     unwrap(dump, OrignalEntryPoint)
