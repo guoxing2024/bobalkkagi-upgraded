@@ -1,25 +1,20 @@
 """
 Memory Tracker — 内存页保护状态追踪
 ======================================
-Bobalkkagi升级 — 追踪Unicorn模拟期间的内存页保护状态变化
+Bobalkkagi v2.0 — 追踪Unicorn模拟期间的内存页保护状态变化
 
-用途：
-1. 检测RW→RX转换（Themida解密完成后会标记代码段为可执行）
-2. 识别高价值区域（写入次数多→执行→解密区）
-3. 为OEP检测、VM区域识别提供信号
-
-使用方法：
-  tracker = MemoryTracker()
-  tracker.install(uc)           # 在模拟开始前安装hook
-  # ... 模拟运行 ...
-  report = tracker.get_report()  # 获取分析报告
-  oep_hint = tracker.find_oep_signal()  # 获取OEP候选
+支持事件总线模式：
+  MemoryTrackerV2 自动将写入/保护变更/执行事件发送到EventBus
 """
 
 from collections import defaultdict
 from datetime import datetime
 from unicorn import *
 from unicorn.x86_const import *
+
+# v2.0 EventBus 集成
+from ..core.events import MemoryEvent, EventType
+from ..core.plugin import EventBus
 
 # 保护标志映射
 PROTECT_NAMES = {
