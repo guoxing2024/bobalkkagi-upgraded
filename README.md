@@ -136,7 +136,10 @@ crc_bypass_post_load(uc, themida, boot, image_base, mode='safe')
 ### 限制说明
 
 1. **VM代码不可运行**: Themida的VM保护段(.themida)虽然被dump出来，但原始控制流经过VM化后无法直接执行。标注"Devirtualization(Not yet)"
-2. **IAT不完整**: 每个DLL只恢复了原始PE中可见的极少数函数（Themida隐藏了大部分）。完整IAT需要运行时扫描(Scylla-style)
+2. **IAT不完整**: 每个DLL只恢复了原始PE中可见的极少数函数。
+   - 当前IAT基于**原始PE导入表 + 运行时API调用记录**（通过api_recorder抓取GetProcAddress调用）
+   - 运行时记录可以大幅增加IAT完整度，但仍有遗漏（Unicorn模拟不完全的情况）
+   - 如果遇到加载失败，建议用Scylla等工具做完整IAT扫描
 3. **CRC绕过**: 
    - 此模块为**启发式绕过**，可能**误伤**（破坏正常条件跳转）或**漏杀**（变形CRC校验逃逸扫描）
    - 建议仅在**测试环境**使用

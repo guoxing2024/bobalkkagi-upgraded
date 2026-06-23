@@ -103,4 +103,6 @@ HookFuncs={
     
     # ntdll - 杂项增强 (81)
     "ntdll.dll_RtlGetVersion" : 81,
+    "ntdll.dll_ZwSetContextThread" : 82,
+    "ntdll.dll_ZwGetContextThread" : 83,
 }

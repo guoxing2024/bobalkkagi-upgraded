@@ -143,17 +143,28 @@ class PERebuilder:
             # Check data exists in file at the right place
             data_end = new_roff + aligned_vsize
             if data_end > file_size:
-                # Data extends beyond file - this may be OK for sections that
-                # don't actually have data (e.g., .bss or TLS template)
+                # Critical Themida sections - these MUST have full data
+                CRITICAL_SECTIONS = {'.themida', '.boot', '.text', '.idata', '.rsrc'}
+                is_critical = sec['name'] in CRITICAL_SECTIONS
+                
                 actual_data = file_size - new_roff
-                if actual_data > 0:
+                if actual_data <= 0:
+                    if is_critical:
+                        print(f"  ❌ {sec['name']}: 关键段 VA 0x{vaddr:x} 完全超出文件范围! 重建后无法运行")
+                    else:
+                        print(f"  ⚠ {sec['name']}: VA 0x{vaddr:x} 超出文件范围, 保留原值")
+                    continue
+                
+                # Partial data exists
+                if is_critical:
+                    print(f"  ❌ {sec['name']}: 关键段超出文件边界 {data_end:x}>{file_size:x}, "
+                          f"仅0x{actual_data:x}/0x{aligned_vsize:x}字节可用 — 重建后该段数据不完整!")
+                    new_rsize = ((actual_data + self.file_alignment - 1) // 
+                                self.file_alignment) * self.file_alignment
+                else:
                     new_rsize = ((actual_data + self.file_alignment - 1) // 
                                 self.file_alignment) * self.file_alignment
                     print(f"  ⚠ {sec['name']}: 超出文件边界 {data_end:x}>{file_size:x}, 截断为0x{new_rsize:x}")
-                else:
-                    # No data at this offset - keep original but flag it
-                    print(f"  ⚠ {sec['name']}: VA 0x{vaddr:x} 超出文件范围, 保留原值")
-                    continue
             
             # Apply fix
             old_roff = sec['roff']

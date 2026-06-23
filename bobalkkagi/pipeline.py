@@ -21,6 +21,7 @@ from .globalValue import GLOBAL_VAR
 from .pe_rebuilder import PERebuilder
 from .iat_rebuilder import IATRebuilder
 from .util import checkInput
+from . import api_recorder
 
 BobLog = logging.getLogger("Bobalkkagi.Pipeline")
 
@@ -76,6 +77,9 @@ def unpack_full(protected_file, verbose='f', mode='f', dll_path="win10_v1903", o
         print(f"  阶段 1/3: Unicorn 模拟脱壳")
         print(f"{'='*60}")
         
+        # 初始化运行时API记录器
+        api_recorder.clear()
+        
         dump, oep = unpack(protected_file, verbose_bool, mode, oep_flag)
         
         if not dump or len(dump) == 0:
@@ -107,7 +111,20 @@ def unpack_full(protected_file, verbose='f', mode='f', dll_path="win10_v1903", o
         print(f"  阶段 3/3: IAT 重建")
         print(f"{'='*60}")
         
-        iat = IATRebuilder(bytearray(rebuilder.data), protected_file)
+        # 获取运行时API记录，补充IAT
+        runtime_calls = api_recorder.get_calls_by_dll()
+        runtime_count = sum(len(v) for v in runtime_calls.values())
+        if runtime_calls:
+            print(f"  运行时API调用记录: {runtime_count}个函数, {len(runtime_calls)}个DLL")
+            # 打印重要DLL的调用
+            for dll in sorted(runtime_calls.keys()):
+                funcs = runtime_calls[dll]
+                if len(funcs) <= 5:
+                    print(f"    {dll}: {', '.join(funcs)}")
+                else:
+                    print(f"    {dll}: {', '.join(funcs[:5])} ...({len(funcs)})")
+        
+        iat = IATRebuilder(bytearray(rebuilder.data), protected_file, runtime_calls=runtime_calls)
         iat_success = iat.rebuild(verbose=False)
         
         if not iat_success:

@@ -21,9 +21,10 @@ SIZE_OF_IMPORT_DESCRIPTOR = 20  # 5 * 4 bytes
 class IATRebuilder:
     """Rebuild import table from original PE into memory dump"""
     
-    def __init__(self, dump_data: bytearray, orig_pe_path: str):
+    def __init__(self, dump_data: bytearray, orig_pe_path: str, runtime_calls: dict = None):
         self.dump_data = dump_data
         self.orig_pe = pefile.PE(orig_pe_path, fast_load=True)
+        self.runtime_calls = runtime_calls or {}  # {dll_name: [func_name, ...]}
         self._parse_dump_headers()
         self._parse_orig_imports()
     
@@ -80,10 +81,12 @@ class IATRebuilder:
             self.data_dirs.append({'va': va, 'size': sz, 'offset': dd})
     
     def _parse_orig_imports(self):
-        """Parse import table from original PE"""
+        """Parse import table from original PE and merge with runtime calls"""
         self.orig_pe.parse_data_directories()
         self.orig_imports = []
         
+        # Step 1: Collect imports from original PE
+        orig_by_dll = {}
         if hasattr(self.orig_pe, 'DIRECTORY_ENTRY_IMPORT'):
             for entry in self.orig_pe.DIRECTORY_ENTRY_IMPORT:
                 dll_name = entry.dll.decode('utf-8') if entry.dll else "unknown"
@@ -93,14 +96,56 @@ class IATRebuilder:
                         functions.append(imp.name.decode('utf-8'))
                     else:
                         functions.append(f"ord({imp.ordinal})")
-                self.orig_imports.append({
+                orig_by_dll[dll_name.lower()] = {
                     'dll': dll_name,
-                    'original_rva': entry.struct.OriginalFirstThunk,
+                    'functions': functions,
                     'first_thunk': entry.struct.FirstThunk,
                     'name_rva': entry.struct.Name,
-                    'functions': functions,
-                    'imports': entry.imports
-                })
+                }
+        
+        # Step 2: Merge with runtime calls (if available)
+        # Runtime calls caught by api_recorder during emulation
+        # give us a much more complete picture of what's actually used
+        merged_dlls = set(list(orig_by_dll.keys()) + [d.lower() for d in self.runtime_calls.keys()])
+        
+        for dll_lower in sorted(merged_dlls):
+            orig = orig_by_dll.get(dll_lower, {})
+            runtime_funcs = self.runtime_calls.get(dll_lower, [])
+            
+            # Original functions + runtime functions merged
+            orig_funcs = set(orig.get('functions', []))
+            runtime_funcs_set = set(runtime_funcs) - {'__load__'}  # filter out load markers
+            
+            all_funcs = list(orig_funcs | runtime_funcs_set)
+            all_funcs.sort()
+            
+            # Determine DLL name (use original form if available)
+            dll_name = orig.get('dll', dll_lower)
+            
+            # Build import data structures
+            import_entries = []
+            for func_name in all_funcs:
+                class _MockImport:
+                    def __init__(self, name_str):
+                        self.name = name_str.encode('utf-8') if name_str else None
+                        self.ordinal = 0
+                        self.address = 0
+                import_entries.append(_MockImport(func_name))
+            
+            self.orig_imports.append({
+                'dll': dll_name,
+                'original_rva': orig.get('first_thunk', 0) if orig else 0,
+                'first_thunk': orig.get('first_thunk', 0) if orig else 0,
+                'name_rva': orig.get('name_rva', 0) if orig else 0,
+                'functions': all_funcs,
+                'imports': import_entries,
+            })
+            
+            # Print merge info
+            if runtime_funcs_set:
+                added = runtime_funcs_set - orig_funcs
+                if added:
+                    pass  # Called from pipeline.py which prints the summary
     
     def find_section_by_va(self, rva):
         """Find section containing a given RVA"""
@@ -168,12 +213,16 @@ class IATRebuilder:
             print(f"  Import directory VA=0x{self.data_dirs[1]['va']:x}, Size=0x{self.data_dirs[1]['size']:x}")
             print(f"  Used: 0x{idata_used:x}, Available: 0x{idata_sec['vsize']:x}")
     
-    def validate_imports(self) -> list:
+    def validate_imports(self) -> tuple:
         """
         Validate original PE import table for anomalies.
-        Returns a list of warning strings (empty = no issues).
+        Returns: (warnings_list, is_trusted_bool)
+          - is_trusted=True: 导入表可信，可以直接使用
+          - is_trusted=False: 导入表异常，建议用运行时扫描补充
         """
         warnings = []
+        has_known_dlls = False
+        all_trusted = True
         
         # Known Windows system DLLs for reference
         known_dlls = {
@@ -189,23 +238,23 @@ class IATRebuilder:
         }
         
         if not self.orig_imports:
-            warnings.append("⚠ 原始PE导入表为空! IAT重建后程序可能无法运行")
-            return warnings
+            warnings.append("❌ 原始PE导入表为空! 无法重建IAT")
+            return warnings, False
         
         for imp in self.orig_imports:
             dll = imp['dll'].lower()
             func_count = len(imp['functions'])
             
-            # Check: DLL name looks suspicious
+            if dll in known_dlls:
+                has_known_dlls = True
+            
             if not imp['dll'] or len(imp['dll'].strip()) == 0:
-                warnings.append(f"  ⚠ 发现空DLL名称 (索引 #{self.orig_imports.index(imp)})")
+                warnings.append(f"  ⚠ 空DLL名称 (索引 #{self.orig_imports.index(imp)})")
                 continue
             
-            # Check: unknown DLL (not in known set)
             if dll not in known_dlls and not dll.startswith('api-ms-win-') and not dll.startswith('ext-ms-win-'):
                 warnings.append(f"  ⚠ 非标准DLL: {imp['dll']} (可能为Themida伪造)")
             
-            # Check: suspiciously few functions for known large DLLs
             func_expected = {
                 'kernel32.dll': 20, 'kernelbase.dll': 15, 'ntdll.dll': 15,
                 'user32.dll': 10, 'gdi32.dll': 10, 'ole32.dll': 5,
@@ -214,13 +263,22 @@ class IATRebuilder:
             }
             if dll in func_expected and func_count < func_expected[dll]:
                 warnings.append(f"  ⚠ {imp['dll']}: 仅{func_count}个导入, 预期>={func_expected[dll]} (Themida隐藏了大部分)")
+                all_trusted = False
         
         known_suspicious = {'api-ms-win-core-libraryloader-l1-2-1.dll', 'ext-ms-win-ntuser-window-l1-1-0.dll'}
         for imp in self.orig_imports:
             if imp['dll'].lower() in known_suspicious:
                 warnings.append(f"  ⚠ {imp['dll']}: API集DLL可能不是完整导入表")
         
-        return warnings
+        # Summary
+        is_trusted = has_known_dlls and all_trusted
+        if not is_trusted and warnings:
+            warnings.insert(0, "  📋 导入表可信度: 低 — 当前IAT基于原始PE导入表，Themida可能隐藏了大部分导入")
+            warnings.insert(1, "    建议: 使用运行时IAT扫描工具(如Scylla)获取完整导入表")
+        elif is_trusted:
+            warnings.insert(0, "  📋 导入表可信度: 高 — 直接使用原始PE导入表")
+        
+        return warnings, is_trusted
     
     def rebuild(self, verbose=True):
         """
@@ -233,7 +291,7 @@ class IATRebuilder:
             self.analyze()
         
         # Validate import table and warn
-        warnings = self.validate_imports()
+        warnings, is_trusted = self.validate_imports()
         if warnings:
             print("\n=== IAT 有效性检查 ===")
             for w in warnings:
@@ -241,9 +299,9 @@ class IATRebuilder:
             if any("导入表为空" in w for w in warnings):
                 print("  ❌ 导入表为空，放弃IAT重建")
                 return False
-            if any("Themida隐藏" in w for w in warnings):
-                print("  ⚠ 部分DLL导入数异常偏少，重建后的导入表可能不完整")
-                print("    建议用Scylla-style运行时扫描获取完整IAT")
+            if not is_trusted:
+                print("  ⚠ 导入表可信度低 — 重建后的IAT可能不完整")
+                print("  ⚠ 建议: 配合运行时IAT扫描工具(如Scylla)获取完整导入表")
         
         # We need the .idata section to have enough space
         # Approach: write import data into .idata section's free space

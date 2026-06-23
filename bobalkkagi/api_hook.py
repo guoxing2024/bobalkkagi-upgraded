@@ -5,6 +5,7 @@ from .loader import PE_Loader
 from .reflector import REFLECTOR
 from .globalValue import DLL_SETTING, HEAP_HANDLE, InvDllDict, GLOBAL_VAR
 from .util import *
+from . import api_recorder
 
 import struct
 import os
@@ -129,6 +130,9 @@ def hook_LoadLibraryA(uc, log, regs):
     d_address = 0
     dllName = EndOfString(bytes(uc.mem_read(REGS.rcx, 0x20))) #byte string
     
+    # Record DLL load for runtime IAT reconstruction
+    api_recorder.record(dllName, "__load__")
+    
     if dllName not in DLL_SETTING.LoadedDll:
         PE_Loader(uc, dllName, GLOBAL_VAR.DllEnd)
         InvDllDict()
@@ -154,8 +158,16 @@ def hook_GetProcAddress(uc, log, regs):
     f_address = 0
 
     functionName=EndOfString(bytes(uc.mem_read(REGS.rdx, 0x20)))
-    functionName = DLL_SETTING.InverseLoadedDll[REGS.rcx]+"_" + functionName
-    f_address = DLL_SETTING.DllFuncs[functionName]
+    dll_name = DLL_SETTING.InverseLoadedDll.get(REGS.rcx, "unknown.dll")
+    functionName_full = dll_name + "_" + functionName
+    
+    # Record this API call for runtime IAT reconstruction
+    api_recorder.record(dll_name, functionName)
+    
+    try:
+        f_address = DLL_SETTING.DllFuncs[functionName_full]
+    except KeyError:
+        f_address = 0
 
     uc.mem_write(REGS.rsp+0x8,struct.pack('<Q',REGS.rbx))
     uc.mem_write(REGS.rsp+0x18,struct.pack('<Q',REGS.rbp))
@@ -163,7 +175,7 @@ def hook_GetProcAddress(uc, log, regs):
     uc.mem_write(REGS.rsp+0x10,struct.pack('<Q',f_address))
     if f_address:
         uc.reg_write(UC_X86_REG_RAX,f_address)
-    log.warning(f"HOOK_API_CALL : GetProcAddress, {functionName}: {hex(f_address)}")
+    log.warning(f"HOOK_API_CALL : GetProcAddress, {functionName_full}: {hex(f_address)}")
     
     
 
@@ -998,9 +1010,13 @@ def hook_ZwQueryInformationThread(uc, log, regs):
 # ----- ntdll 杂项 (49-51) -----
 
 def hook_ZwQueryObject(uc, log, regs):
-    """ZwQueryObject - 返回STATUS_INFO_LENGTH_MISMATCH（反调试）"""
+    """ZwQueryObject - 返回STATUS_INFO_LENGTH_MISMATCH（反调试）
+    
+    策略: Themida 3.1.8+通过NtQueryObject检测调试器句柄。
+    返回STATUS_INFO_LENGTH_MISMATCH阻止枚举。"""
     set_register(regs)
-    log.warning(f"HOOK_API_CALL : ZwQueryObject")
+    log.warning(f"HOOK_API_CALL : ZwQueryObject, handle=0x{REGS.rcx:x}, "
+                f"class=0x{REGS.rdx:x}")
     uc.reg_write(UC_X86_REG_RAX, 0xC0000004)  # STATUS_INFO_LENGTH_MISMATCH
     ret(uc, REGS.rsp)
 
@@ -1009,6 +1025,22 @@ def hook_ZwYieldExecution(uc, log, regs):
     set_register(regs)
     log.warning(f"HOOK_API_CALL : ZwYieldExecution")
     uc.reg_write(UC_X86_REG_RAX, 0x101)  # STATUS_NO_YIELD_PERFORMED
+    ret(uc, REGS.rsp)
+
+def hook_ZwSetContextThread(uc, log, regs):
+    """ZwSetContextThread - 允许设置上下文（反调试绕过）
+    
+    策略: Themida检查是否能通过此API访问其他线程上下文来判断调试器。"""
+    set_register(regs)
+    log.warning(f"HOOK_API_CALL : ZwSetContextThread, handle=0x{REGS.rcx:x}")
+    uc.reg_write(UC_X86_REG_RAX, 0x0)  # STATUS_SUCCESS
+    ret(uc, REGS.rsp)
+
+def hook_ZwGetContextThread(uc, log, regs):
+    """ZwGetContextThread - 返回成功（反调试绕过）"""
+    set_register(regs)
+    log.warning(f"HOOK_API_CALL : ZwGetContextThread, handle=0x{REGS.rcx:x}")
+    uc.reg_write(UC_X86_REG_RAX, 0x0)
     ret(uc, REGS.rsp)
 
 def hook_LdrLoadDll(uc, log, regs):
