@@ -93,7 +93,54 @@ application.py ──┐
                      └─ unpack_full() — automated 3-step
 ```
 
-## New API Hooks (82 total)
+## API Hook 策略文档 (82 hooks)
+
+每个Unicorn钩子必须正确伪装为"未调试/未模拟"状态，否则Themida会检测到异常。
+
+### 关键反调试钩子返回策略
+
+| Hook | Themida检测手段 | 返回策略 |
+|------|----------------|----------|
+| `ZwQueryInformationProcess(ProcessDebugPort=0x7)` | 检查调试端口 | 返回0（未调试） |
+| `ZwQueryInformationProcess(ProcessDebugFlags=0x1F)` | 检查EPROCESS.DebugFlags | 返回1（已禁用） |
+| `ZwSetInformationThread(ThreadHideFromDebugger=0x11)` | 隐藏线程 | 返回STATUS_SUCCESS |
+| `ZwQuerySystemInformation(SystemKernelDebuggerInfo=0x23)` | 检查内核调试器 | 返回STATUS_INFO_LENGTH_MISMATCH |
+| `ZwQueryObject` | 检查对象句柄信息 | 返回STATUS_INFO_LENGTH_MISMATCH |
+| `ZwRaiseHardError` | 触发硬错误 | 忽略并返回成功 |
+| `ZwTerminateProcess` | 自杀（CRC校验失败时） | **阻止**，返回STATUS_ACCESS_DENIED |
+| `RtlGetVersion` | 系统版本不匹配 | 返回Win10 1903 (10.0.18362) |
+| `QueryPerformanceCounter` | RDTSC延迟检测 | 返回递增计数值 |
+| `GetTickCount/GetTickCount64` | 时间检测 | 返回递增值 |
+| `KUSER_SHARED_DATA.KdDebuggerEnabled` | 直接读取KUSER | **设为0**（原代码错误设为1！） |
+| `PEB.BeingDebugged` | 直接读取PEB | 设为0 |
+| `PEB.NtGlobalFlag` | 检查堆标志 | 设为0 |
+| `ZwYieldExecution` | CPU yield检测 | 返回STATUS_NO_YIELD_PERFORMED |
+
+### CRC Bypass 模式
+
+```python
+# 安全模式（默认）：只patch附近有ROL/ROR/CRC32指令的CMP+Jcc
+# 激进模式：所有CMP+Jcc都NOP掉
+crc_bypass_post_load(uc, themida, boot, image_base, mode='safe')
+```
+
+## 兼容性测试矩阵
+
+| Themida版本 | 保护级别 | 脱壳 | OEP检测 | PE重建 | IAT重建 | VM代码 | 测试样本 |
+|-------------|----------|------|---------|--------|---------|--------|----------|
+| 3.1.3 | Tiger red64 | ✅ | ✅ | ✅ | ✅ 部分 | ❌ | Sample.exe(测试样本) |
+| 3.1.x | 未知 | ✅ | ✅ | ✅ | ✅ 部分 | ❌ | 伦伦软件.exe |
+| 3.1.8+ | 反调试增强 | ⚠ 未测试 | ⚠ | ⚠ | ⚠ | ❌ | 需要样本 |
+| 3.x VM | VM Enabled | ❌ Devirt未实现 | - | - | - | ❌ | - |
+
+### 限制说明
+
+1. **VM代码不可运行**: Themida的VM保护段(.themida)虽然被dump出来，但原始控制流经过VM化后无法直接执行。标注"Devirtualization(Not yet)"
+2. **IAT不完整**: 每个DLL只恢复了原始PE中可见的极少数函数（Themida隐藏了大部分）。完整IAT需要运行时扫描(Scylla-style)
+3. **CRC绕过**: 安全模式下可能漏过某些变形的CRC校验；激进模式可能误伤正常条件跳转
+4. **单线程模型**: Unicorn只模拟单线程，Themida多线程保护（反调试线程等）未被处理
+5. **Windows版本依赖**: 需要win10_v1903 DLL目录，其他Windows版本可能不完全兼容
+6. **网络验证**: Themida的网络验证/注册机制未模拟，联网保护的程序需额外处理
 
 ```
 ntdll:

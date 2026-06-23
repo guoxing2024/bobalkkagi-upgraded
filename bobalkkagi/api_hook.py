@@ -805,6 +805,17 @@ def hook_exit(uc, log, regs):
 
 # =====================================================================
 # Bobalkkagi升级: 新增API钩子 (33-80)
+#
+# 反调试/反模拟策略说明:
+# Themida 3.1.8+ 会检测:
+#   - 调试端口 (ZwQueryInformationProcess ProcessDebugPort)
+#   - 调试标志 (ZwQueryInformationProcess ProcessDebugFlags)
+#   - 内核调试器 (ZwQuerySystemInformation)
+#   - RDTSC 时间戳延迟
+#   - KUSER_SHARED_DATA 中的 KdDebuggerEnabled
+#   - PEB 中的 BeingDebugged / NtGlobalFlag
+#   - 硬件调试寄存器
+# 每个hook的返回策略在函数注释中标注
 # =====================================================================
 
 # ----- ntdll 注册表操作 (33-36) -----

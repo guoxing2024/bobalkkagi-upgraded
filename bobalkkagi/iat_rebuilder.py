@@ -168,6 +168,60 @@ class IATRebuilder:
             print(f"  Import directory VA=0x{self.data_dirs[1]['va']:x}, Size=0x{self.data_dirs[1]['size']:x}")
             print(f"  Used: 0x{idata_used:x}, Available: 0x{idata_sec['vsize']:x}")
     
+    def validate_imports(self) -> list:
+        """
+        Validate original PE import table for anomalies.
+        Returns a list of warning strings (empty = no issues).
+        """
+        warnings = []
+        
+        # Known Windows system DLLs for reference
+        known_dlls = {
+            'kernel32.dll', 'kernelbase.dll', 'ntdll.dll', 'user32.dll',
+            'gdi32.dll', 'win32u.dll', 'advapi32.dll', 'ole32.dll',
+            'oleaut32.dll', 'comctl32.dll', 'comdlg32.dll', 'shell32.dll',
+            'shlwapi.dll', 'ws2_32.dll', 'wininet.dll', 'crypt32.dll',
+            'bcrypt.dll', 'iphlpapi.dll', 'winmm.dll', 'd3d11.dll',
+            'dwmapi.dll', 'imm32.dll', 'rpcrt4.dll', 'sechost.dll',
+            'ucrtbase.dll', 'msvcrt.dll', 'combase.dll', 'shcore.dll',
+            'd2d1.dll', 'dxgi.dll', 'dwrite.dll', 'wtsapi32.dll',
+            'setupapi.dll', 'cfgmgr32.dll', 'devobj.dll', 'wintrust.dll',
+        }
+        
+        if not self.orig_imports:
+            warnings.append("⚠ 原始PE导入表为空! IAT重建后程序可能无法运行")
+            return warnings
+        
+        for imp in self.orig_imports:
+            dll = imp['dll'].lower()
+            func_count = len(imp['functions'])
+            
+            # Check: DLL name looks suspicious
+            if not imp['dll'] or len(imp['dll'].strip()) == 0:
+                warnings.append(f"  ⚠ 发现空DLL名称 (索引 #{self.orig_imports.index(imp)})")
+                continue
+            
+            # Check: unknown DLL (not in known set)
+            if dll not in known_dlls and not dll.startswith('api-ms-win-') and not dll.startswith('ext-ms-win-'):
+                warnings.append(f"  ⚠ 非标准DLL: {imp['dll']} (可能为Themida伪造)")
+            
+            # Check: suspiciously few functions for known large DLLs
+            func_expected = {
+                'kernel32.dll': 20, 'kernelbase.dll': 15, 'ntdll.dll': 15,
+                'user32.dll': 10, 'gdi32.dll': 10, 'ole32.dll': 5,
+                'advapi32.dll': 5, 'shell32.dll': 10, 'crypt32.dll': 5,
+                'wininet.dll': 5, 'shlwapi.dll': 5,
+            }
+            if dll in func_expected and func_count < func_expected[dll]:
+                warnings.append(f"  ⚠ {imp['dll']}: 仅{func_count}个导入, 预期>={func_expected[dll]} (Themida隐藏了大部分)")
+        
+        known_suspicious = {'api-ms-win-core-libraryloader-l1-2-1.dll', 'ext-ms-win-ntuser-window-l1-1-0.dll'}
+        for imp in self.orig_imports:
+            if imp['dll'].lower() in known_suspicious:
+                warnings.append(f"  ⚠ {imp['dll']}: API集DLL可能不是完整导入表")
+        
+        return warnings
+    
     def rebuild(self, verbose=True):
         """
         Rebuild IAT by:
@@ -177,6 +231,19 @@ class IATRebuilder:
         """
         if verbose:
             self.analyze()
+        
+        # Validate import table and warn
+        warnings = self.validate_imports()
+        if warnings:
+            print("\n=== IAT 有效性检查 ===")
+            for w in warnings:
+                print(w)
+            if any("导入表为空" in w for w in warnings):
+                print("  ❌ 导入表为空，放弃IAT重建")
+                return False
+            if any("Themida隐藏" in w for w in warnings):
+                print("  ⚠ 部分DLL导入数异常偏少，重建后的导入表可能不完整")
+                print("    建议用Scylla-style运行时扫描获取完整IAT")
         
         # We need the .idata section to have enough space
         # Approach: write import data into .idata section's free space
