@@ -1,0 +1,8 @@
+/bobalkkagi/__pycache__
+/dist/
+/build/
+/bobalkkagi/dumpfiles
+/log/
+/dumpfiles/
+*.exe
+/bobalkkagi/log
