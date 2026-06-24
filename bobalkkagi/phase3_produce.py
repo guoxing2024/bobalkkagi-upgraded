@@ -73,16 +73,18 @@ def produce_final_exe(input_exe: str, oep_rva: int = None,
     if output is None:
         output = input_exe.replace('_unpacked', '_phase3')
 
-    # Step 1: Auto-detect OEP if not specified
+    # Step 1: Auto-detect OEP using fast pattern scan
     if oep_rva is None:
-        from .oep_detector import detect_oep
-        detected = detect_oep(input_exe)
+        from .v6_final import find_oep_in_dump
+        with open(input_exe, 'rb') as f:
+            data = f.read()
+        detected = find_oep_in_dump(data)
         if detected:
-            oep_rva = detected - 0x140000000  # RVA
-            print(f"  [Phase3] Auto-detected OEP: 0x{detected:x} (RVA=0x{oep_rva:x})")
+            oep_rva = detected - 0x140000000
+            print(f"  [Phase3] Auto OEP: 0x{detected:x}")
         else:
-            oep_rva = 0x1000  # fallback to first code section entry
-            print(f"  [Phase3] Using fallback OEP: 0x{oep_rva:x}")
+            oep_rva = 0x1000
+            print(f"  [Phase3] Fallback OEP: 0x{oep_rva:x}")
 
     # Step 2: Fix OEP
     tmp = fix_oep(input_exe, oep_rva)
@@ -99,7 +101,11 @@ def produce_final_exe(input_exe: str, oep_rva: int = None,
     print(f"  [Phase3] reloc={has_reloc} rsrc={has_rsrc} iat={iat}")
     print(f"  [Phase3] OEP=0x{pe.OPTIONAL_HEADER.AddressOfEntryPoint:x}")
 
-    # Step 3: Copy to final output
+    # Step 3: Expand IAT with essential imports
+    from .v6_final import expand_iat_with_fallback
+    expand_iat_with_fallback(tmp, tmp)
+
+    # Step 4: Copy to final output
     import shutil
     shutil.copy(tmp, output)
     print(f"  [Phase3] Done: {output}")
