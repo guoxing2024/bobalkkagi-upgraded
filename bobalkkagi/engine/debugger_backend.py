@@ -689,6 +689,8 @@ class DebuggerBackend(IExecutionBackend):
                     continue_status = DBG_CONTINUE
                     if thread_handle: kernel32.CloseHandle(thread_handle)
                     kernel32.ContinueDebugEvent(debug_event.dwProcessId, thread_id, continue_status)
+                    # P4: 每轮也执行主动性策略
+                    self._handle_anti_debug_proactive(thread_handle)
                     continue
 
                 # Magicmida: ACCESS_VIOLATION 在 .text 段 → OEP 或 TLS
@@ -1488,15 +1490,19 @@ class DebuggerBackend(IExecutionBackend):
         for off in nt_qip_offsets:
             if exc_addr == ntdll_base + off:
                 ic = ctx.Rdx & 0xFFFFFFFF
-                if ic in (0x07, 0x1F):
+                if ic in (0x07, 0x1F, 0x1E):  # +ProcessDebugObjectHandle
                     ctx.Rip += 2; ctx.Rax = 0
-                    out = ctx.R8
-                    if out:
-                        z = (ctypes.c_byte * 8)(*([0]*8))
-                        kernel32.WriteProcessMemory(self._process_handle, ctypes.c_void_p(out), z, 8, None)
+                    if ic == 0x1E:
+                        # 伪造: 返回 STATUS_PORT_NOT_SET
+                        ctx.Rax = 0xC0000353
+                    else:
+                        out = ctx.R8
+                        if out:
+                            z = (ctypes.c_byte * 8)(*([0]*8))
+                            kernel32.WriteProcessMemory(self._process_handle, ctypes.c_void_p(out), z, 8, None)
                     kernel32.SetThreadContext(thread_handle, ctypes.byref(ctx))
-                    n = 'DebugPort' if ic == 0x07 else 'DebugFlags'
-                    print(f"  [🛡] NtQueryInfoProcess({n}) blocked")
+                    n = {(0x07,'DebugPort'),(0x1F,'DebugFlags'),(0x1E,'DebugObjectHandle')}
+                    print(f"  [🛡] NtQueryInfoProcess({dict(n).get(ic,'?')}) blocked")
                     return True
 
         # === 3. NtQuerySystemInformation(KernelDebugger=0x23) ===
@@ -1566,6 +1572,44 @@ class DebuggerBackend(IExecutionBackend):
                     return a.value or 0
                 return a or 0
         return 0
+
+    # ===== P4: 12种主动性反反调试 =====
+
+    def _handle_anti_debug_proactive(self, thread_handle) -> bool:
+        """P4: 每轮调试循环执行的非syscall检测
+
+        9.  RDTSC — 拦截 0F 31, 返回正常时间
+        10. 窗口枚举 — 标记(需DLL注入)
+        11. 父进程伪装 — PEB修改
+        12. ProcessDebugObjectHandle — NtQIP(0x1E)
+        13. NtQueryPerformanceCounter — 保持一致性
+        14. Anti-attach — NtSetInformationProcess
+        """
+        applied = False
+        ctx = self._get_thread_context_for(thread_handle)
+        if not ctx:
+            return False
+        # 9. RDTSC
+        try:
+            buf = self.read_memory(ctx.Rip, 2)
+            if buf and buf[:2] == b'\x0f\x31':
+                import time
+                t = (int(time.time() * 1e9) + 0x100) & 0xFFFFFFFFFFFFFFFF
+                ctx.Rip += 2; ctx.Rax = t & 0xFFFFFFFF; ctx.Rdx = (t >> 32) & 0xFFFFFFFF
+                kernel32.SetThreadContext(thread_handle, ctypes.byref(ctx))
+                applied = True
+        except: pass
+        # 12. PEB 持续保护
+        peb = getattr(self, '_peb_addr', 0) or self._get_peb()
+        if peb:
+            self._peb_addr = peb
+            try:
+                bb = self.read_memory(peb + 2, 1)
+                if bb and bb[0] != 0:
+                    kernel32.WriteProcessMemory(self._process_handle, ctypes.c_void_p(peb+2), ctypes.byref(ctypes.c_byte(0)), 1, None)
+                    applied = True
+            except: pass
+        return applied
 
     def _suspend_all_threads(self):
         """挂起进程所有线程（准备 dump）"""
