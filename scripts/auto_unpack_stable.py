@@ -23,6 +23,12 @@ import time
 import argparse
 import subprocess
 
+# Ensure bobalkkagi is on path
+_script_dir = os.path.dirname(os.path.abspath(__file__))
+_project_dir = os.path.dirname(_script_dir)
+if _project_dir not in sys.path:
+    sys.path.insert(0, _project_dir)
+
 
 def auto_unpack_stable(
     file_path: str,
