@@ -190,6 +190,12 @@ class UnicornBackend(IExecutionBackend):
             except:
                 pass
 
+        # 转换模式名 (agent_unpack 传 'fast'/'deep', unpack() 需要 'f'/'c'/'b')
+        mode_map = {'fast': 'f', 'deep': 'c', 'hook_code': 'c', 'hook_block': 'b'}
+        inner_mode = mode_map.get(self._emu_mode, self._emu_mode)
+        if len(inner_mode) > 1 and inner_mode not in ('fast','deep'):
+            inner_mode = 'f'  # default fallback
+
         self._running = True
         oep = 0
         error_msg = ""
@@ -197,7 +203,7 @@ class UnicornBackend(IExecutionBackend):
 
         # 委托给成熟的 unpack() 函数
         try:
-            dump_data, oep = unpack(ctx.sample_path, self._verbose, self._emu_mode, 't')
+            dump_data, oep = unpack(ctx.sample_path, self._verbose, inner_mode, 't')
         except Exception as e:
             error_msg = str(e)
             try:
