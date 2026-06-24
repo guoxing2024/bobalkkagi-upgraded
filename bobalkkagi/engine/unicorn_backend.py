@@ -237,19 +237,9 @@ class UnicornBackend(IExecutionBackend):
             from .user_mode_stubber import install_user_mode_stubs
             stubber = install_user_mode_stubs(self_uc, verbose=self._verbose)
 
-            # V6 Phase 2: SEH + Multi-thread + OEP capture
-            from .phase2_engine import install_phase2_engine
-            from ..globalValue import GLOBAL_VAR, DLL_SETTING
-            sec_info = {
-                'text_start': 0x140001000,
-                'text_size': 0x1a3550,
-                'boot_start': 0x140885000,
-                'boot_size': 0x3d9000,
-                'themida_start': 0x140213000,
-                'themida_size': 0x672000,
-            }
-            self._phase2 = install_phase2_engine(
-                self_uc, 0x140000000, verbose=self._verbose, sections=sec_info)
+            # V6 Phase 2: (DISABLED for Phase 3 testing)
+            # from .phase2_engine import install_phase2_engine
+            # self._phase2 = install_phase2_engine(...)
 
             return orig_emu_start(self_uc, *args, **kwargs)
 
