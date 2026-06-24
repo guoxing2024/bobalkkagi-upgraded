@@ -241,28 +241,14 @@ class UnicornBackend(IExecutionBackend):
             # from .phase2_engine import install_phase2_engine
             # self._phase2 = install_phase2_engine(...)
 
-            # V6: OEP Stub Tracer — narrow hook near OEP area (0x4ed000-0x4f0000)
-            from .oep_stub_tracer import OEPStubTracer
-            stub_tracer = OEPStubTracer(None, 0x140000000, verbose=self._verbose)
-            self._stub_tracer = stub_tracer
-            OEP_AREA = 0x1404ed000
-            OEP_END  = 0x1404f0000
-            def _on_code_for_stub(uc, address, size, user_data):
-                if stub_tracer.trace_active:
-                    result = stub_tracer.trace_instruction(address)
-                    if result:
-                        self._real_oep = result
-                        if self._verbose:
-                            print(f'  [StubTracer] Real OEP: 0x{result:x}')
-                elif stub_tracer.check_peb_access(address):
-                    stub_tracer.trace_instruction(address)
-            self_uc.hook_add(UC_HOOK_CODE, _on_code_for_stub, None,
-                           OEP_AREA, OEP_END)
-            # Also hook the other candidate OEP area
-            OEP2_AREA = 0x140563000
-            OEP2_END  = 0x140564000
-            self_uc.hook_add(UC_HOOK_CODE, _on_code_for_stub, None,
-                           OEP2_AREA, OEP2_END)
+            # V6: Cross-section OEP — hook .boot section (TLS execution area)
+            from .cross_section_oep import CrossSectionOEP
+            self._cross_oep = CrossSectionOEP(
+                self_uc, 0x140000000, verbose=self._verbose)
+            # Hook .boot section (VA 0x885000-0xc5e000, 3.8MB)
+            # TLS callbacks execute here → eventually jump to .text
+            self_uc.hook_add(UC_HOOK_CODE, self._cross_oep.on_code, None,
+                           0x140885000, 0x140c5e000)
 
             return orig_emu_start(self_uc, *args, **kwargs)
 
@@ -289,7 +275,7 @@ class UnicornBackend(IExecutionBackend):
             backend=self.display_name,
             stage=ExecutionStage.DONE,
             dump_data=None,
-            oep=getattr(self, '_real_oep', None) or oep or self._ep,
+            oep=getattr(self._cross_oep, 'real_oep', None) or oep or self._ep,
             image_base=GLOBAL_VAR.image_base,
             image_end=GLOBAL_VAR.image_end,
             api_calls=api_calls,
