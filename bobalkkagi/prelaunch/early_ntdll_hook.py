@@ -135,27 +135,27 @@ def hook_nt_query_info(h_process, h_thread, pid, de_buf=None):
     # Structure: [filter] [handle_07] [handle_1f] [handle_1e] [pass_through: orig + jmp back]
     sc = bytes([
         # Filter section
-        0x81, 0xFA, 0x07, 0x00, 0x00, 0x00,  # cmp edx, 7 (DebugPort)
-        0x74, 0x10,                              # je handle_07 (+16)
-        0x81, 0xFA, 0x1F, 0x00, 0x00, 0x00,     # cmp edx, 0x1F (DebugFlags)
-        0x74, 0x18,                              # je handle_1f (+24)
-        0x81, 0xFA, 0x1E, 0x00, 0x00, 0x00,     # cmp edx, 0x1E (DebugObjectHandle)
-        0x74, 0x20,                              # je handle_1e (+32)
-        # Passthrough: execute original bytes, jmp back
-        0xFF, 0x25, 0x00, 0x00, 0x00, 0x00,     # jmp [rip+0] -> saved_instrs
-    ] + struct.pack('<Q', cave + 0x400) + bytes([
-        # handle_07: DebugPort → write 0 to output, return SUCCESS
-        0x49, 0xC7, 0x00, 0x00, 0x00, 0x00, 0x00,  # mov [r8], 0
-        0x31, 0xC0,                                 # xor eax, eax
-        0xC3,                                       # ret
-        # handle_1f: DebugFlags → write 0 to output, return SUCCESS
-        0x49, 0xC7, 0x00, 0x01, 0x00, 0x00, 0x00,  # mov qword [r8], 1
-        0x31, 0xC0,                                 # xor eax, eax
-        0xC3,                                       # ret
-        # handle_1e: DebugObjectHandle → return STATUS_PORT_NOT_SET
-        0xB8, 0x53, 0x03, 0x00, 0xC0,             # mov eax, 0xC0000353
-        0xC3,                                       # ret
-    ]))
+        0x81, 0xFA, 0x07, 0x00, 0x00, 0x00,
+        0x74, 0x10,
+        0x81, 0xFA, 0x1F, 0x00, 0x00, 0x00,
+        0x74, 0x18,
+        0x81, 0xFA, 0x1E, 0x00, 0x00, 0x00,
+        0x74, 0x20,
+        # Passthrough: jmp [rip+0] -> saved_instrs
+        0xFF, 0x25, 0x00, 0x00, 0x00, 0x00,
+    ]) + struct.pack('<Q', cave + 0x400) + bytes([
+        # handle_07: DebugPort -> write 0, return SUCCESS
+        0x49, 0xC7, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x31, 0xC0,
+        0xC3,
+        # handle_1f: DebugFlags -> write 1, return SUCCESS
+        0x49, 0xC7, 0x00, 0x01, 0x00, 0x00, 0x00,
+        0x31, 0xC0,
+        0xC3,
+        # handle_1e: DebugObjectHandle -> STATUS_PORT_NOT_SET
+        0xB8, 0x53, 0x03, 0x00, 0xC0,
+        0xC3,
+    ])
 
     old = ctypes.c_uint32()
     k32.VirtualProtectEx(h_process, ctypes.c_void_p(cave), len(sc) + 0x800, 0x40, ctypes.byref(old))
