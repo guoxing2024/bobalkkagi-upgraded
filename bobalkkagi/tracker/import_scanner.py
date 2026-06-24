@@ -77,8 +77,15 @@ def scan_thunks(dump_data, image_base=0x140000000, verbose=True):
         print(f"  [ImportScanner] 扫描 {len(dump_data)} bytes...")
     
     scan_size = min(len(dump_data), 0x1000000)  # 最多扫描16MB
+    # Skip PE header: code starts at offset 0x1000 (first section VA)
+    scan_offset = 0x1000  
+    if scan_offset >= scan_size:
+        if verbose:
+            print(f"  [ImportScanner] dump too small to scan")
+        return {}
+    
     try:
-        for insn in md.disasm(dump_data[:scan_size], image_base):
+        for insn in md.disasm(dump_data[scan_offset:scan_size], image_base + scan_offset):
             # call [rip+offset]
             if insn.mnemonic == 'call' and insn.op_str.startswith('qword ptr [rip + 0x'):
                 try:

@@ -205,14 +205,20 @@ class Pipeline:
         # Try classifying regions from dump
         if self.ctx.memory_image:
             # Scan executable pages from the dump using capstone
+            # Start from first code section, not PE header
             try:
                 from capstone import Cs, CS_ARCH_X86, CS_MODE_64
                 md = Cs(CS_ARCH_X86, CS_MODE_64)
                 exec_count = 0
-                for insn in md.disasm(self.ctx.memory_image[:0x100000], 
-                                      self.ctx.image_base):
+                # Scan from 0x1000 (skip PE header) 
+                scan_start = max(0x1000, self.ctx.oep & 0xFFF) if self.ctx.oep else 0x1000
+                scan_size = min(0x100000, len(self.ctx.memory_image) - scan_start)
+                for insn in md.disasm(self.ctx.memory_image[scan_start:scan_start+scan_size], 
+                                      self.ctx.image_base + scan_start):
                     exec_count += 1
-                print(f"  Code scan: ~{exec_count} instructions in first 1MB")
+                    if exec_count > 50000:
+                        break
+                print(f"  Code scan: ~{exec_count} instructions starting at +0x{scan_start:x}")
             except:
                 pass
         

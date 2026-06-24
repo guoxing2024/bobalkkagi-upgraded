@@ -177,7 +177,7 @@ def crc_bypass_post_load(uc, themida_section, boot_section, image_base, mode='sa
             
         data = bytearray(code)
         
-        result = scan_and_patch_crc(data, boot_base, 0, len(data), mode=mode)
+        result = scan_and_patch_crc(data, boot_base, boot_base, len(data), mode=mode)
         if result["patches"] > 0:
             uc.mem_write(boot_base, bytes(data))
             status = "完整扫描" if result["completed"] else "部分扫描"
