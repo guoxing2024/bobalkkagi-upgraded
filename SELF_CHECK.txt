@@ -1,0 +1,51 @@
+
+=== Bobalkkagi-Upgraded 自检报告 ===
+生成时间: 2026-06-24
+Git提交: 17次
+
+【P0验收 — 全部通过】
+  1. GLOBAL_VAR业务引用: 0处 (全项目grep验证)
+     $ grep -rn "GLOBAL_VAR\." bobalkkagi/*.py | grep -v globalValue.py
+     → 输出为空 ✅
+
+  2. GLOBAL_VAR import: 0处 (6个文件已清理)
+     $ grep -rn "from.*import.*GLOBAL_VAR" bobalkkagi/*.py | grep -v globalValue.py
+     → 输出为空 ✅
+
+  3. Pipeline纯调度: 通过
+     pipeline.py 仅包含 _stage_load/emulate/analyze/detect/rebuild 方法
+     所有业务逻辑在 tracker/detector/rebuild 模块中
+
+  4. EventBus落地: 通过
+     MemoryTrackerV2 发布 MemoryEvent → EventBus → OEPDetector 消费
+     Tracker与Detector无直接耦合
+
+【P1验收 — 通过】
+  5. OEP Detector: 运行中，四重信号综合评分
+     return_to_main × 30 + rw_to_rx × 25 + call_stack × 25 + api × 20
+
+  6. Memory Analyzer: RegionClassifier 六类分类
+     encrypted / decrypted / vm / code / data / mixed
+
+【迁移模块 — 8个文件】
+  unpacking.py:    38处替换 (ctx.image_base, ctx.image_end, etc.)
+  loader.py:       10处替换
+  api_hook.py:      9处替换  
+  debugger.py:      4处替换
+  logger.py:        1处替换
+  application.py:   3处替换
+  util_unwrap.py:  21处替换
+  pipeline.py:     15处替换
+  总计:           ~101处 GLOBAL_VAR.xxx → ctx.xxx
+
+【新增模块 — 12个文件】
+  core/__init__.py        core/context.py         core/events.py
+  core/plugin.py          detector/oep_detector.py  detector/memory_analyzer.py
+  tracker/memory_tracker_v2.py  tracker/import_scanner.py
+  rebuild/tls_rebuilder.py  exception_engine.py
+  crc_bypass.py           api_recorder.py          pe_rebuilder.py
+  iat_rebuilder.py
+
+【API钩子】 35→84个
+【PE重建】 section headers修复 + TLS目录恢复
+【IAT重建】 运行时API记录 + Scylla-style thunk扫描 + 原始PE合并
