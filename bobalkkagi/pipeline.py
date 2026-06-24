@@ -44,11 +44,14 @@ class Pipeline:
         print(f"OEP: 0x{result.oep:x}")
     """
     
-    def __init__(self, sample_path: str, dll_path: str = "win10_v1903"):
+    def __init__(self, sample_path: str, dll_path: str = "win10_v1903",
+                 force_runtime_iat: bool = False, crc_mode: str = "safe"):
         self.sample_path = sample_path
         self.dll_path = dll_path
         self.ctx = UnpackContext(sample_path)
         self.event_bus = EventBus()
+        self.force_runtime_iat = force_runtime_iat
+        self.crc_mode = crc_mode
     
     def run(self) -> PipelineResult:
         """运行完整流水线"""
@@ -186,11 +189,15 @@ class Pipeline:
         from . import api_recorder
         runtime = api_recorder.get_calls_by_dll()
         for dll, funcs in runtime.items():
+            # Populate ctx.imports (display dict)
             if dll not in self.ctx.imports:
                 self.ctx.imports[dll] = []
             for f in funcs:
                 if f not in self.ctx.imports[dll]:
                     self.ctx.imports[dll].append(f)
+                # ALSO populates ctx.runtime_api_calls (used by IATRebuilder)
+                # This was the ROOT CAUSE of "Low Import Count": the pipe was broken.
+                self.ctx.runtime_api_calls.add((dll, f))
     
     def _stage_detect(self):
         """阶段4: OEP 检测 + Memory 分析"""
@@ -261,7 +268,8 @@ class Pipeline:
         from .iat_rebuilder import IATRebuilder
         iat = IATRebuilder(
             bytearray(rebuilder.data), self.sample_path,
-            runtime_calls=self.ctx.get_runtime_imports()
+            runtime_calls=self.ctx.get_runtime_imports(),
+            force_runtime_only=self.force_runtime_iat
         )
         iat_success = iat.rebuild(verbose=False)
         

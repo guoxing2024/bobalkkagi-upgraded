@@ -187,6 +187,12 @@ class PERebuilder:
         
         if oep is not None:
             rva = oep - self.image_base
+            # Guard: if OEP is outside valid PE range (e.g. DLL address from
+            # Unicorn crash), fall back to original entry point or skip.
+            if rva < 0 or rva > 0xFFFFFFFF:
+                print(f"  ⚠ Entry RVA 0x{rva:x} out of range — skipping entry point fix")
+                print(f"     (OEP=0x{oep:x}, ImageBase=0x{self.image_base:x})")
+                return False
         else:
             # Keep current
             return False

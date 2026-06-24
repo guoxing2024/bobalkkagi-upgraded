@@ -21,10 +21,12 @@ SIZE_OF_IMPORT_DESCRIPTOR = 20  # 5 * 4 bytes
 class IATRebuilder:
     """Rebuild import table from original PE into memory dump"""
     
-    def __init__(self, dump_data: bytearray, orig_pe_path: str, runtime_calls: dict = None):
+    def __init__(self, dump_data: bytearray, orig_pe_path: str, runtime_calls: dict = None,
+                 force_runtime_only: bool = False):
         self.dump_data = dump_data
         self.orig_pe = pefile.PE(orig_pe_path, fast_load=True)
         self.runtime_calls = runtime_calls or {}  # {dll_name: [func_name, ...]}
+        self.force_runtime_only = force_runtime_only  # When True, ignore original PE imports entirely
         self._parse_dump_headers()
         self._parse_orig_imports()
     
@@ -106,7 +108,15 @@ class IATRebuilder:
         # Step 2: Merge with runtime calls (if available)
         # Runtime calls caught by api_recorder during emulation
         # give us a much more complete picture of what's actually used
-        merged_dlls = set(list(orig_by_dll.keys()) + [d.lower() for d in self.runtime_calls.keys()])
+        if self.force_runtime_only and self.runtime_calls:
+            # Runtime-only mode: ignore original PE imports entirely.
+            # Themida hides/forges the original import table, so only trust
+            # the API calls we actually observed during emulation.
+            # Only include DLLs found in runtime_calls.
+            merged_dlls = set(d.lower() for d in self.runtime_calls.keys())
+            print(f"  [IAT] force_runtime_only=ON — using {len(merged_dlls)} DLLs from runtime recording")
+        else:
+            merged_dlls = set(list(orig_by_dll.keys()) + [d.lower() for d in self.runtime_calls.keys()])
         
         for dll_lower in sorted(merged_dlls):
             orig = orig_by_dll.get(dll_lower, {})
@@ -116,10 +126,17 @@ class IATRebuilder:
             orig_funcs = set(orig.get('functions', []))
             runtime_funcs_set = set(runtime_funcs) - {'__load__'}  # filter out load markers
             
-            all_funcs = list(orig_funcs | runtime_funcs_set)
-            all_funcs.sort()
+            if self.force_runtime_only:
+                # Runtime-only: skip original functions, keep only observed API calls
+                all_funcs = sorted(runtime_funcs_set)
+            else:
+                all_funcs = list(orig_funcs | runtime_funcs_set)
+                all_funcs.sort()
             
-            # Determine DLL name (use original form if available)
+            if not all_funcs:
+                continue  # Skip DLLs with no functions (happens in force_runtime_only mode)
+            
+            # Determine DLL name (use original form if available, fallback to runtime)
             dll_name = orig.get('dll', dll_lower)
             
             # Build import data structures

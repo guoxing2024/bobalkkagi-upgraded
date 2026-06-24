@@ -2,6 +2,7 @@
 === Bobalkkagi-Upgraded 自检报告 ===
 生成时间: 2026-06-24
 Git提交: 17次
+专家建议验收: ✅ 完成 (见底部验收矩阵)
 
 【P0验收 — 全部通过】
   1. GLOBAL_VAR业务引用: 0处 (全项目grep验证)
@@ -20,12 +21,44 @@ Git提交: 17次
      MemoryTrackerV2 发布 MemoryEvent → EventBus → OEPDetector 消费
      Tracker与Detector无直接耦合
 
+【P0修复 — 专家建议验收 (本轮)】
+  5. IAT数据管道修复: ✅
+     问题: ctx.runtime_api_calls 从未被 api_recorder 填充
+           → ctx.get_runtime_imports() 返回空 → IATRebuilder收到空runtime_calls
+           → 仅使用原始PE导入表 → 每个DLL只恢复1个函数
+     修复: _stage_analyze 同步写入 ctx.runtime_api_calls
+     $ grep -rn "runtime_api_calls.add" bobalkkagi/pipeline.py
+     → bobalkkagi/pipeline.py:199: self.ctx.runtime_api_calls.add((dll, f)) ✅
+
+  6. force_runtime_iat 参数: ✅
+     pipeline.py: Pipeline.__init__(force_runtime_iat=False)
+     agent_interface.py: agent_unpack(force_runtime_iat=False)
+     iat_rebuilder.py: IATRebuilder.__init__(force_runtime_only=False)
+     iat_rebuilder.py: _parse_orig_imports — runtime-only分支
+
+  7. CRC异常回滚机制: ✅
+     RETRY_STRATEGIES["crc_crash"] = [safe→off]
+     RETRY_STRATEGIES["emulation_crash"] = [off→safe+hook_code]
+     agent_unpack 异常捕获后自动按策略重试
+
+  8. NEXT_STEP_SUGGESTIONS: ✅
+     已添加 WARN_LOW_IMPORT_COUNT 和 WARN_PARTIAL_CRC_SCAN 键
+
 【P1验收 — 通过】
-  5. OEP Detector: 运行中，四重信号综合评分
+  9. OEP Detector: 运行中，四重信号综合评分
      return_to_main × 30 + rw_to_rx × 25 + call_stack × 25 + api × 20
 
-  6. Memory Analyzer: RegionClassifier 六类分类
-     encrypted / decrypted / vm / code / data / mixed
+  10. Memory Analyzer: RegionClassifier 六类分类
+      encrypted / decrypted / vm / code / data / mixed
+
+【P1新增 — 专家建议验收 (本轮)】
+  11. RETRY_STRATEGIES 自动重试引擎: ✅
+      策略: oep_not_found, iat_no_imports, emulation_crash, crc_crash, low_import_count
+      agent_unpack 内部根据 error_code 自动匹配策略并重试
+
+  12. 结构化诊断: ✅
+      低导入数时输出: 导入数/DLL数/均值/运行时记录可用数/建议操作
+      导入数>=20时输出: 完整IAT摘要
 
 【迁移模块 — 8个文件】
   unpacking.py:    38处替换 (ctx.image_base, ctx.image_end, etc.)
@@ -48,4 +81,20 @@ Git提交: 17次
 
 【API钩子】 35→84个
 【PE重建】 section headers修复 + TLS目录恢复
-【IAT重建】 运行时API记录 + Scylla-style thunk扫描 + 原始PE合并
+【IAT重建】 运行时API记录 + Scylla-style thunk扫描 + 原始PE合并 + force_runtime_only模式
+
+================================================================
+  专家建议验收矩阵 (2 docs updated)
+================================================================
+
+| # | 建议项 | 优先级 | 状态 | 验证方式 |
+|---|--------|--------|------|---------|
+| 1 | 重构IAT重建策略 — 运行时记录优先 | P0 | ✅ | ctx.runtime_api_calls管道修复 |
+| 2 | IAT仅回退到原始PE | P0 | ✅ | force_runtime_only=False时合并 |
+| 3 | force_runtime_iat参数 | P0 | ✅ | Pipeline/agent/rebuilder三级传递 |
+| 4 | CRC异常回滚+重试safe | P0 | ✅ | RETRY_STRATEGIES内建策略 |
+| 5 | 扩大CRC扫描范围 | P0 | ✅ | scan_and_patch_crc支持任意section |
+| 6 | RETRY_STRATEGIES自动重试引擎 | P1 | ✅ | 5种错误码→策略映射 |
+| 7 | 结构化诊断输出 | P1 | ✅ | 三层诊断(严重/边界/完整) |
+| 8 | SKILL_CARD v2更新 | P1 | ✅ | 新增force_runtime_iat参数 |
+| 9 | IExecutionBackend接口 | P2 | ⏳ | Phase 2范围 |

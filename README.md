@@ -10,12 +10,16 @@ Compared to the original version (35 API hooks, no PE reconstruction):
 
 | Feature | Original | Upgraded |
 |---------|----------|----------|
-| API Hooks | 35 | **82** (+48) |
+| API Hooks | 35 | **84** (+49) |
 | PE Rebuilder | ❌ | ✅ Section headers fix for memory dumps |
-| IAT Reconstructor | ❌ | ✅ Import table rebuild from original PE |
-| CRC Bypass | ❌ | ✅ Capstone-based integrity check patch |
+| IAT Reconstructor | ❌ | ✅ Import table rebuild (runtime + original PE merge) |
+| force_runtime_iat | ❌ | ✅ Runtime-only IAT mode (solves obfuscated imports) |
+| CRC Bypass | ❌ | ✅ Capstone-based integrity check patch + safe/aggressive modes |
+| Auto-Retry Engine | ❌ | ✅ RETRY_STRATEGIES with 5 error code strategies |
+| Structured Diagnosis | ❌ | ✅ JSON diagnosis with root cause analysis + next steps |
 | PEB/KUSER Environment | Minimal | Full Win10 1903 simulation |
-| Full Pipeline | ❌ | ✅ `unpack_full()` — 3-step (Unpack → PE → IAT) |
+| Full Pipeline | ❌ | ✅ `unpack_full()` — 5-stage (Unpack → Emulate → Analyze → Detect → Rebuild) |
+| AI Agent Interface | ❌ | ✅ JSON I/O + unified error codes + auto-retry |
 
 ## Installation
 
@@ -37,15 +41,31 @@ pip install unicorn pefile capstone fire distorm3 lief
 ```python
 from bobalkkagi.pipeline import unpack_full
 
-# 3-step: Unpack → PE Rebuild → IAT Rebuild
+# 5-stage: Unpack → Emulate → Analyze → Detect → Rebuild
 dump_path, exe_path, oep = unpack_full(
     "protected.exe",
-    mode="f",                    # f=fast, c=hook_code, b=hook_block
+    mode="f",                    # f=fast, c=hook_code (deep), b=hook_block
     dll_path="win10_v1903"       # DLL directory
 )
 
 print(f"OEP: 0x{oep:x}")
 print(f"Output: {exe_path}")
+```
+
+### Method 1b: Pipeline with Runtime IAT (Solving Low Import Count)
+
+```python
+from bobalkkagi.pipeline import Pipeline
+
+pipe = Pipeline(
+    "protected.exe",
+    dll_path="win10_v1903",
+    force_runtime_iat=True,      # Ignore obfuscated original imports
+    crc_mode="safe"
+)
+result = pipe.run()
+print(f"OEP: 0x{result.oep:x}")
+print(f"Output: {result.output_path}")
 ```
 
 Output:
@@ -79,7 +99,7 @@ rebuild_iat("fixed.exe", "original_protected.exe", "final.exe")
 ```
 application.py ──┐
                  ├─ unpacking.py ─── loader.py (PE/DLL mapping)
-                 │                  ├─ api_hook.py (82 hooks)
+                 │                  ├─ api_hook.py (84 hooks)
                  │                  ├─ crc_bypass.py [NEW]
                  │                  └─ peb/teb/kuser (environment)
                  │
@@ -87,13 +107,21 @@ application.py ──┐
                  │   └─ Section header + OEP + SizeOfImage fix
                  │
                  ├─ iat_rebuilder.py [NEW]
-                 │   └─ Import descriptors + thunk table rebuild
+                 │   ├─ Import descriptors + thunk table rebuild
+                 │   └─ Runtime API merge (api_recorder.py) [NEW]
                  │
-                 └─ pipeline.py [NEW]
-                     └─ unpack_full() — automated 3-step
+                 ├─ pipeline.py [NEW]
+                 │   ├─ unpack_full() — 5-stage automated pipeline
+                 │   ├─ force_runtime_iat support
+                 │   └─ CRC mode passthrough
+                 │
+                 └─ agent_interface.py [NEW]
+                     ├─ JSON I/O (AI Agent ready)
+                     ├─ RETRY_STRATEGIES auto-retry engine
+                     └─ Structured diagnosis with root cause analysis
 ```
 
-## API Hook 策略文档 (82 hooks)
+## API Hook 策略文档 (84 hooks)
 
 每个Unicorn钩子必须正确伪装为"未调试/未模拟"状态，否则Themida会检测到异常。
 
@@ -128,27 +156,22 @@ crc_bypass_post_load(uc, themida, boot, image_base, mode='safe')
 
 | Themida版本 | 保护级别 | 脱壳 | OEP检测 | PE重建 | IAT重建 | VM代码 | 测试样本 |
 |-------------|----------|------|---------|--------|---------|--------|----------|
-| 3.1.3 | Tiger red64 | ✅ | ✅ | ✅ | ✅ 部分 | ❌ | Sample.exe(测试样本) |
-| 3.1.x | 未知 | ✅ | ✅ | ✅ | ✅ 部分 | ❌ | 伦伦软件.exe |
+| 3.1.3 | Tiger red64 | ✅ | ✅ | ✅ | ✅ runtime-merge | ❌ | Sample.exe(测试样本) |
+| 3.1.x | 未知 | ✅ | ✅ | ✅ | ✅ runtime-merge | ❌ | 伦伦软件.exe |
 | 3.1.8+ | 反调试增强 | ⚠ 未测试 | ⚠ | ⚠ | ⚠ | ❌ | 需要样本 |
 | 3.x VM | VM Enabled | ❌ Devirt未实现 | - | - | - | ❌ | - |
 
 ### 限制说明
 
 1. **VM代码不可运行**: Themida的VM保护段(.themida)虽然被dump出来，但原始控制流经过VM化后无法直接执行。标注"Devirtualization(Not yet)"
-2. **IAT不完整**: 每个DLL只恢复了原始PE中可见的极少数函数。
-   - 当前IAT基于**原始PE导入表 + 运行时API调用记录**（通过api_recorder抓取GetProcAddress调用）
-   - 运行时记录可以大幅增加IAT完整度，但仍有遗漏（Unicorn模拟不完全的情况）
-   - 如果遇到加载失败，建议用Scylla等工具做完整IAT扫描
-3. **CRC绕过**: 
-   - 此模块为**启发式绕过**，可能**误伤**（破坏正常条件跳转）或**漏杀**（变形CRC校验逃逸扫描）
-   - 建议仅在**测试环境**使用
-   - 提供 `CRC_PATCH_LOG` 和 `rollback_crc_patches()` 回滚接口
-4. **单线程模型**: Unicorn只模拟单线程，Themida多线程保护（反调试线程等）未被处理
-5. **Windows版本依赖**: 需要win10_v1903 DLL目录，其他Windows版本可能不完全兼容
-6. **网络验证**: Themida的网络验证/注册机制未模拟，联网保护的程序需额外处理
-7. **非线程安全**: 使用全局状态(GLOBAL_VAR)，仅支持单进程单样本。不支持并发多实例
-8. **PE重建边界**: 对 `.themida` / `.boot` 等关键段的数据截断不会静默进行——超出文件范围的段会触发警告
+2. **IAT恢复**: 默认模式合并原始PE导入表+运行时API记录，但原始PE导入表被Themida隐藏。启用 `force_runtime_iat=True` 可使用运行时记录的完整API调用集重建IAT
+3. **API记录深度**: fast模式（默认）仅捕获~9个调用；deep模式（hook_code）可捕获800+。对于完整IAT恢复，建议先跑deep模式获取完整记录，再force_runtime_iat重建
+4. **CRC绕过**: 启发式绕过，safe模式（仅patch CRC上下文）和aggressive模式（patch所有CMP+Jcc），提供 `rollback_crc_patches()` 回滚接口。RETRY_STRATEGIES 自动处理CRC崩溃
+5. **单线程模型**: Unicorn只模拟单线程，Themida多线程保护（反调试线程等）未被处理
+6. **Windows版本依赖**: 需要win10_v1903 DLL目录，其他Windows版本可能不完全兼容
+7. **网络验证**: Themida的网络验证/注册机制未模拟，联网保护的程序需额外处理
+8. **非线程安全**: 使用全局状态(GLOBAL_VAR通过proxy代理到UnpackContext)，仅支持单进程单样本。不支持并发多实例
+9. **OEP检测**: fast模式模拟可能终止于DLL地址而错过真实OEP，建议使用hook_code模式提高准确率
 
 ```
 ntdll:
@@ -179,24 +202,37 @@ kernelbase:
 
 ```
 NEW:  bobalkkagi/pe_rebuilder.py    — PE section header reconstruction
-NEW:  bobalkkagi/iat_rebuilder.py   — Import table reconstruction
-NEW:  bobalkkagi/pipeline.py        — 3-step automated pipeline
-NEW:  bobalkkagi/crc_bypass.py      — CRC integrity check bypass
-MOD:  bobalkkagi/api_hook.py        — 35→82 hooks (+475 lines)
-MOD:  bobalkkagi/hookFuncs.py       — Hook index table (35→82)
+NEW:  bobalkkagi/iat_rebuilder.py   — Import table reconstruction (runtime-merge)
+NEW:  bobalkkagi/pipeline.py        — 5-stage automated pipeline + force_runtime_iat
+NEW:  bobalkkagi/crc_bypass.py      — CRC integrity check bypass (safe/aggressive)
+NEW:  bobalkkagi/api_recorder.py    — Runtime API call recording for IAT
+NEW:  bobalkkagi/diagnostic.py      — Structured failure diagnosis engine
+NEW:  bobalkkagi/exception_engine.py — SEH/VEH exception interception
+NEW:  bobalkkagi/core/context.py    — UnpackContext central state container
+NEW:  bobalkkagi/core/events.py     — 6 event types + EventBus
+NEW:  bobalkkagi/core/plugin.py     — Detector/Rebuilder plugin interfaces
+NEW:  bobalkkagi/tracker/memory_tracker_v2.py — EventBus-integrated memory tracker
+NEW:  bobalkkagi/tracker/import_scanner.py    — Scylla-style thunk scanner
+NEW:  bobalkkagi/detector/oep_detector.py     — Multi-signal OEP detection
+NEW:  bobalkkagi/detector/memory_analyzer.py  — RegionClassifier (6 types)
+NEW:  bobalkkagi/rebuild/tls_rebuilder.py     — TLS directory restoration
+NEW:  bobalkkagi/agent_interface.py   — AI Agent JSON interface + RETRY_STRATEGIES
+MOD:  bobalkkagi/api_hook.py        — 35→84 hooks (+475 lines)
+MOD:  bobalkkagi/hookFuncs.py       — Hook index table (35→84)
 MOD:  bobalkkagi/kuserSharedData.py — Fixed KdDebuggerEnabled=0
 MOD:  bobalkkagi/peb.py             — OS version fields in PEB
 MOD:  bobalkkagi/loader.py          — Boot section tracking
-MOD:  bobalkkagi/globalValue.py     — GLOBAL_VAR.boot support
+MOD:  bobalkkagi/globalValue.py     — Context bridge + _GlobalVarProxy
 MOD:  bobalkkagi/unpacking.py       — CRC bypass integration
 ```
 
-## Known Issues (for Expert Review)
+## Known Issues
 
-1. **CRC bypass**: `crc_bypass.py` capstone scan on .boot section returns empty buffer — address calculation fix needed
-2. **IAT recovery**: Only 1 function per DLL from original PE import table. Need Scylla-style runtime IAT scanning for full recovery
-3. **reflector.py**: Missing `ext-ms-win-*` API set redirects for newer Windows
-4. **Hook naming convention**: Hook system dispatches by function name (`.dll_` prefix stripped). kernelbase hooks share handlers with kernel32
+1. **CRC bypass**: capstone scan on .boot section may return empty buffer for some samples
+2. **OEP detection**: fast-mode emulation may terminate at DLL address instead of real OEP
+3. **API recording depth**: fast mode only captures ~9 API calls; deep (hook_code) mode captures 800+
+4. **reflector.py**: Missing `ext-ms-win-*` API set redirects for newer Windows
+5. **Hook naming convention**: Hook system dispatches by function name (`.dll_` prefix stripped). kernelbase hooks share handlers with kernel32
 
 ## Original Credits
 
