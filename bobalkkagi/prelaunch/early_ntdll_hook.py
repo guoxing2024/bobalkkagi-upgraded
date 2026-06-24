@@ -86,22 +86,31 @@ def hook_nt_query_info(h_process, h_thread, pid, de_buf=None):
     if exp_rva == 0 or exp_rva + exp_size > len(pe_data):
         return False
 
-    exp = pe_data[exp_rva:exp_rva + min(exp_size, 0x4000)]
+    exp = pe_data[exp_rva:exp_rva + min(exp_size, 0x8000)]
     num_names = struct.unpack_from('<I', exp, 24)[0]
     addr_rva = struct.unpack_from('<I', exp, 28)[0]
     name_rva = struct.unpack_from('<I', exp, 32)[0]
     ord_rva = struct.unpack_from('<I', exp, 36)[0]
 
+    # All export RVAs are IMAGE-RELATIVE — convert to buffer offsets
+    name_off = name_rva - exp_rva
+    ord_off = ord_rva - exp_rva
+    addr_off = addr_rva - exp_rva
+
     target = b'NtQueryInformationProcess'
     func_rva = 0
     for i in range(min(num_names, 2000)):
-        np = struct.unpack_from('<I', pe_data, name_rva + i * 4)[0]
-        if np + len(target) < len(pe_data) and \
-           pe_data[np:np + len(target)] == target and \
-           pe_data[np + len(target)] == 0:
-            oi = struct.unpack_from('<H', pe_data, ord_rva + i * 2)[0]
-            func_rva = struct.unpack_from('<I', pe_data, addr_rva + oi * 4)[0]
-            break
+        np = struct.unpack_from('<I', exp, name_off + i * 4)[0]
+        # np is RVA; read name string from process memory
+        name_buf = (ctypes.c_char * 128)()
+        rd = ctypes.c_size_t(0)
+        if k32.ReadProcessMemory(h_process, ctypes.c_void_p(ntdll_base + np),
+                                 name_buf, 128, ctypes.byref(rd)):
+            name = bytes(name_buf[:64])
+            if name[:len(target)] == target and name[len(target)] == 0:
+                oi = struct.unpack_from('<H', exp, ord_off + i * 2)[0]
+                func_rva = struct.unpack_from('<I', exp, addr_off + oi * 4)[0]
+                break
 
     if not func_rva:
         print(f"  [EarlyHook] NtQueryInformationProcess not found in export table")
