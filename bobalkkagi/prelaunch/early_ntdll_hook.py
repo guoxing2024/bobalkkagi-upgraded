@@ -121,20 +121,50 @@ def hook_nt_query_info(h_process, h_thread, pid, de_buf=None):
         print(f"  [EarlyHook] NtQueryInformationProcess not found in export table")
         return False
 
-    # Shellcode
-    sc = bytes([0x81, 0xFA, 0x07, 0x00, 0x00, 0x00, 0x75, 0x0E,
-                0x49, 0xC7, 0x00, 0x00, 0x00, 0x00, 0x00,
-                0x31, 0xC0, 0xC3,
-                0xB8, 0x22, 0x00, 0x00, 0xC0, 0xC3])
+    # Save original bytes and install detour
     cave = ntdll_base + 0x100000
     target_addr = ntdll_base + func_rva
-    jmp_code = b'\xff\x25\x00\x00\x00\x00' + struct.pack('<Q', cave)
+    orig_buf = (ctypes.c_char * 30)()
+    rd = ctypes.c_size_t(0)
+    k32.ReadProcessMemory(h_process, ctypes.c_void_p(target_addr), orig_buf, 30, ctypes.byref(rd))
+    orig_bytes = bytes(orig_buf[:30])
+    # Save to cave area
+    k32.WriteProcessMemory(h_process, ctypes.c_void_p(cave + 0x400), orig_bytes, 30, None)
+
+    # Shellcode: check edx for debug classes, pass through if not
+    # Structure: [filter] [handle_07] [handle_1f] [handle_1e] [pass_through: orig + jmp back]
+    sc = bytes([
+        # Filter section
+        0x81, 0xFA, 0x07, 0x00, 0x00, 0x00,  # cmp edx, 7 (DebugPort)
+        0x74, 0x10,                              # je handle_07 (+16)
+        0x81, 0xFA, 0x1F, 0x00, 0x00, 0x00,     # cmp edx, 0x1F (DebugFlags)
+        0x74, 0x18,                              # je handle_1f (+24)
+        0x81, 0xFA, 0x1E, 0x00, 0x00, 0x00,     # cmp edx, 0x1E (DebugObjectHandle)
+        0x74, 0x20,                              # je handle_1e (+32)
+        # Passthrough: execute original bytes, jmp back
+        0xFF, 0x25, 0x00, 0x00, 0x00, 0x00,     # jmp [rip+0] -> saved_instrs
+    ] + struct.pack('<Q', cave + 0x400) + bytes([
+        # handle_07: DebugPort → write 0 to output, return SUCCESS
+        0x49, 0xC7, 0x00, 0x00, 0x00, 0x00, 0x00,  # mov [r8], 0
+        0x31, 0xC0,                                 # xor eax, eax
+        0xC3,                                       # ret
+        # handle_1f: DebugFlags → write 0 to output, return SUCCESS
+        0x49, 0xC7, 0x00, 0x01, 0x00, 0x00, 0x00,  # mov qword [r8], 1
+        0x31, 0xC0,                                 # xor eax, eax
+        0xC3,                                       # ret
+        # handle_1e: DebugObjectHandle → return STATUS_PORT_NOT_SET
+        0xB8, 0x53, 0x03, 0x00, 0xC0,             # mov eax, 0xC0000353
+        0xC3,                                       # ret
+    ]))
 
     old = ctypes.c_uint32()
-    k32.VirtualProtectEx(h_process, ctypes.c_void_p(cave), len(sc), 0x40, ctypes.byref(old))
+    k32.VirtualProtectEx(h_process, ctypes.c_void_p(cave), len(sc) + 0x800, 0x40, ctypes.byref(old))
     k32.WriteProcessMemory(h_process, ctypes.c_void_p(cave), sc, len(sc), None)
-    k32.VirtualProtectEx(h_process, ctypes.c_void_p(target_addr), len(jmp_code), 0x40, ctypes.byref(old))
-    k32.WriteProcessMemory(h_process, ctypes.c_void_p(target_addr), jmp_code, len(jmp_code), None)
+
+    # JMP [cave] at function entry
+    jmp_code = b'\xff\x25\x00\x00\x00\x00' + struct.pack('<Q', cave)
+    k32.VirtualProtectEx(h_process, ctypes.c_void_p(target_addr), 14, 0x40, ctypes.byref(old))
+    k32.WriteProcessMemory(h_process, ctypes.c_void_p(target_addr), jmp_code, 14, None)
 
     print(f"  [EarlyHook] Hooked: 0x{target_addr:x} -> cave 0x{cave:x}")
     return True
