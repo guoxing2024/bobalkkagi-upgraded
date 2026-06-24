@@ -81,6 +81,7 @@ class UnicornBackend(IExecutionBackend):
         self._themida_end = 0
         self._vm_entry_detected = False
         self._captured_vm_entries: List[int] = []
+        self._oep_suspects: List[dict] = []
 
     # ===== 元信息 =====
 
@@ -200,8 +201,25 @@ class UnicornBackend(IExecutionBackend):
         oep = 0
         error_msg = ""
         dump_data = None
+        self._oep_suspects = []  # P3: OEP tracker suspects
 
-        # 委托给成熟的 unpack() 函数
+        # P3: 注入 OEP 追踪器 — 包装 hook_code 和 hook_api
+        import bobalkkagi.unpacking as up_mod
+        orig_hook_code = up_mod.hook_code
+        orig_hook_api = up_mod.hook_api
+
+        def tracked_hook_code(uc, address, size, user_data):
+            result = orig_hook_code(uc, address, size, user_data)
+            self._track_oep_escape(uc, address)
+            return result
+
+        def tracked_hook_api(uc, address, size, user_data):
+            result = orig_hook_api(uc, address, size, user_data)
+            self._track_oep_escape(uc, address)
+            return result
+
+        up_mod.hook_code = tracked_hook_code
+        up_mod.hook_api = tracked_hook_api
         try:
             dump_data, oep = unpack(ctx.sample_path, self._verbose, inner_mode, 't')
         except Exception as e:
@@ -240,7 +258,33 @@ class UnicornBackend(IExecutionBackend):
         if self._captured_vm_entries:
             result.extra["vm_entries"] = self._captured_vm_entries
 
+        if self._oep_suspects:
+            result.extra["oep_suspects"] = self._oep_suspects
+            print(f"  [UnicornBackend] OEP tracker: {len(self._oep_suspects)} escape points detected")
+
         return result
+
+    def _track_oep_escape(self, uc, address):
+        """P3: OEP 逃逸追踪 — 监控控制流从主模块跳向外部"""
+        try:
+            from ..globalValue import GLOBAL_VAR
+            image_base = GLOBAL_VAR.image_base
+            image_end = GLOBAL_VAR.image_end
+            rip = uc.reg_read(UC_X86_REG_RIP)
+            # 当前指令在主模块内，但下一条在外部
+            if image_base <= address < image_end and not (image_base <= rip < image_end):
+                rsp = uc.reg_read(UC_X86_REG_RSP)
+                try:
+                    stack_val = struct.unpack('<Q', uc.mem_read(rsp, 8))[0]
+                except:
+                    stack_val = 0
+                self._oep_suspects.append({
+                    'from_addr': address,
+                    'to_addr': rip,
+                    'stack_top': stack_val,
+                })
+        except:
+            pass
 
     # ===== P3: Magicmida 内存陷阱 (Unicorn) =====
 
