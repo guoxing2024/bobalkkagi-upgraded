@@ -1,0 +1,33 @@
+# bobalkkagi-upgraded V9.0 最终报告
+
+**日期**: 2026-06-24  
+**样本**: 伦伦软件.exe (Themida 3.x, x64)  
+**Commit**: `a629892`  
+**结论**: 问题不在 OEP/IAT/PE，而在 Unicorn 与真实 Windows 的环境缺口  
+
+---
+
+## 里程碑
+
+```
+V6: ✅ 证明处于 VM Runtime
+V7: ✅ 证明未进入 Native  
+V8: ✅ 证明 VM 无状态推进 (固定循环)
+V9: ✅ PEB/TEB 正确 — 缺口更深层
+```
+
+## 核心数据
+
+- 41M 指令, 100% 在 .boot (0x140885000)
+- 17 个 VM handlers, H03↔H04↔H05↔H08 固定循环
+- .themida 30M 指令间 0/6 页面变化 → 完全静态
+- .text 永远未解密, VirtualAlloc 永远未调用
+- Fetch Trap 设计正确但观察目标错误
+
+## 已冻结
+
+- OEP 检测 / IAT 重建 / PE 修复 / 资源处理
+
+## 下一阶段
+
+Reality Gap Analysis — 为什么真实程序继续而 Unicorn 循环
