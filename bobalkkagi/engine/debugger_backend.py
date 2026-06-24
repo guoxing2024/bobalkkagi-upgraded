@@ -71,7 +71,7 @@ PAGE_READONLY = 0x02
 
 # VirtualProtectEx prototype
 kernel32.VirtualProtectEx.argtypes = [wintypes.HANDLE, wintypes.LPVOID,
-    wintypes.SIZE_T, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)]
+    ctypes.c_size_t, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)]
 kernel32.VirtualProtectEx.restype = wintypes.BOOL
 
 # Debug event codes
@@ -695,7 +695,7 @@ class DebuggerBackend(IExecutionBackend):
 
         try:
             buf = (ctypes.c_byte * size)()
-            bytes_read = wintypes.SIZE_T(0)
+            bytes_read = ctypes.c_size_t(0)
 
             success = kernel32.ReadProcessMemory(
                 self._process_handle,
@@ -783,7 +783,7 @@ class DebuggerBackend(IExecutionBackend):
             return
         try:
             buf = (ctypes.c_byte * 0x1000)()
-            br = wintypes.SIZE_T(0)
+            br = ctypes.c_size_t(0)
             if not kernel32.ReadProcessMemory(self._process_handle, ctypes.c_void_p(self._image_base), buf, 0x1000, ctypes.byref(br)):
                 return
             data = bytes(buf)
@@ -1098,7 +1098,7 @@ class DebuggerBackend(IExecutionBackend):
 
         try:
             buf = (ctypes.c_byte * 0x1000)()
-            bytes_read = wintypes.SIZE_T(0)
+            bytes_read = ctypes.c_size_t(0)
             if kernel32.ReadProcessMemory(
                 self._process_handle, ctypes.c_void_p(self._image_base),
                 buf, 0x1000, ctypes.byref(bytes_read)
@@ -1121,7 +1121,7 @@ class DebuggerBackend(IExecutionBackend):
             dll_info = debug_event.u.LoadDll
             if dll_info.lpImageName and dll_info.fUnicode:
                 name_buf = (ctypes.c_wchar * 260)()
-                bytes_read = wintypes.SIZE_T(0)
+                bytes_read = ctypes.c_size_t(0)
                 if kernel32.ReadProcessMemory(
                     self._process_handle,
                     ctypes.c_void_p(dll_info.lpImageName),
