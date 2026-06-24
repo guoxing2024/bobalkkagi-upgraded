@@ -206,6 +206,13 @@ class Pipeline:
         # Store OEP in context
         self.ctx.oep = oep
 
+        # P3: 从执行结果提取运行时VM入口
+        if exec_result.extra.get("vm_entries"):
+            self._vm_analysis_result["detected"] = True
+            self._vm_analysis_result["engine"] = "themida"
+            self._vm_analysis_result["entry_points"] = [f"0x{e:x}" for e in exec_result.extra["vm_entries"]]
+            print(f"  🎯 Runtime VM entries: {len(exec_result.extra['vm_entries'])} captured")
+
         # 6. 清理后端
         self._backend.cleanup(self.ctx)
 
@@ -270,8 +277,19 @@ class Pipeline:
         lift_engine = VTILLiftEngine()
         vm = VMAnalyzer(self.ctx, lift_engine)
 
-        # 分析
+        # 分析（文件扫描 + .boot 回退）
         result = vm.analyze(self.ctx.memory_image, self.ctx.image_base)
+
+        # 合并运行时VM入口（从UnicornBackend执行阶段捕获）
+        if self._vm_analysis_result.get("detected") and self._vm_analysis_result.get("entry_points"):
+            if not result.get("detected"):
+                result["detected"] = True
+                result["engine"] = self._vm_analysis_result.get("engine", "themida")
+            existing = set(result.get("entry_points", []))
+            for ep in self._vm_analysis_result["entry_points"]:
+                if ep not in existing:
+                    result["entry_points"].append(ep)
+            print(f"  🔗 Merged {len(self._vm_analysis_result['entry_points'])} runtime VM entries")
 
         # 如果文件扫描没找到，尝试从 .boot 段扫描 (bootstrap代码在这里跳转到VM)
         if not result["detected"] and self.ctx.memory_image:

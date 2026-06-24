@@ -68,6 +68,12 @@ class UnicornBackend(IExecutionBackend):
         self._running: bool = False
         self._pe = None
 
+        # P3: Runtime VM entry detection
+        self._themida_base = 0
+        self._themida_end = 0
+        self._vm_entry_detected = False
+        self._captured_vm_entries: List[int] = []
+
     # ===== 元信息 =====
 
     @property
@@ -202,7 +208,50 @@ class UnicornBackend(IExecutionBackend):
                 )
 
         print(f"  [UnicornBackend] Hooks installed (mode={self._emu_mode}, crc={self._crc_mode}, crc_patches={crc_patches})")
+
+        # P3: 运行时VM入口检测 — 监控RIP首次进入.themida段
+        from unicorn import UC_HOOK_CODE as UC_CODE
+        self._vm_entry_detected = False
+        self._captured_vm_entries = []
+        self._themida_base = 0
+        self._themida_end = 0
+        if GLOBAL_VAR.themida_section and len(GLOBAL_VAR.themida_section) >= 3:
+            self._themida_base = GLOBAL_VAR.themida_section[1]
+            self._themida_end = self._themida_base + GLOBAL_VAR.themida_section[2]
+            self._uc.hook_add(UC_CODE, self._on_themida_entry, None, self._themida_base, self._themida_end)
+            print(f"  [UnicornBackend] VM entry hook: 0x{self._themida_base:x}-0x{self._themida_end:x}")
+
         return True
+
+    def _on_themida_entry(self, uc, address, size, user_data):
+        """P3: RIP进入.themida段时触发 — 捕获VM入口签名"""
+        if self._vm_entry_detected:
+            return  # 只触发一次
+        self._vm_entry_detected = True
+
+        try:
+            code = uc.mem_read(address, 256)
+            bytecode = bytes(code)
+            # 保存入口地址
+            self._captured_vm_entries.append(address)
+            print(f"  [UnicornBackend] 🎯 VM entry detected at RIP=0x{address:x}")
+
+            # 尝试匹配VM入口签名
+            from ..vm.analyzer import VMAnalyzer, THEMIDA_VM_SIGNATURES
+            vm = VMAnalyzer.__new__(VMAnalyzer)  # 轻量实例，不需要ctx
+            try:
+                from capstone import Cs, CS_ARCH_X86, CS_MODE_64
+                vm._capstone = Cs(CS_ARCH_X86, CS_MODE_64)
+                for sig in THEMIDA_VM_SIGNATURES:
+                    results = vm._match_signature(bytecode, address, sig)
+                    if results:
+                        self._captured_vm_entries.extend(results)
+                        print(f"  [UnicornBackend] VM signature matched: {sig.name}")
+                        break
+            except ImportError:
+                pass
+        except Exception as e:
+            print(f"  [UnicornBackend] VM entry hook error: {e}")
 
     def execute(self, ctx) -> ExecutionResult:
         """执行 Unicorn 模拟"""
@@ -252,7 +301,7 @@ class UnicornBackend(IExecutionBackend):
             success=(oep > 0),
             backend=self.display_name,
             stage=ExecutionStage.DONE,
-            dump_data=None,  # 由 dump_memory() 填充
+            dump_data=None,
             oep=oep or self._ep,
             image_base=GLOBAL_VAR.image_base,
             image_end=GLOBAL_VAR.image_end,
@@ -268,6 +317,13 @@ class UnicornBackend(IExecutionBackend):
             result.diagnosis = (
                 f"Emulation terminated without capturing OEP. RIP at crash: unknown. "
                 f"Try hook_code mode for deeper per-instruction tracing."
+            )
+
+        # P3: VM entry detection results
+        if self._captured_vm_entries:
+            result.extra["vm_entries"] = self._captured_vm_entries
+            result.diagnosis += (
+                f" | VM entries captured: {len(self._captured_vm_entries)}"
             )
 
         return result
