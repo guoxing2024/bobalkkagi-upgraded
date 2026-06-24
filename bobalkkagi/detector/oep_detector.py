@@ -56,7 +56,7 @@ class OEPDetector(OEPDetectorBase):
     
     def initialize(self, ctx) -> bool:
         self.ctx = ctx
-        ctx.transition_oep_state("START")
+        GLOBAL_VAR.transition_oep_state("START")
         return True
     
     def process(self, event: BaseEvent, ctx) -> Optional[BaseEvent]:
@@ -83,16 +83,16 @@ class OEPDetector(OEPDetectorBase):
         
         if old_has_w and new_has_x:
             self._rw_rx_count += 1
-            ctx.transition_oep_state("DECRYPTING")
+            GLOBAL_VAR.transition_oep_state("DECRYPTING")
         
         return None
     
     def _on_exec(self, event: MemoryEvent, ctx) -> Optional[OEPEvent]:
         """记录主模块执行"""
-        if ctx.image_base <= event.address < ctx.image_end:
+        if GLOBAL_VAR.image_base <= event.address < GLOBAL_VAR.image_end:
             self._last_exec_in_main = event.address
             self._return_to_main += 1
-            ctx.transition_oep_state("UNPACKING")
+            GLOBAL_VAR.transition_oep_state("UNPACKING")
         return None
     
     def _on_api(self, event: ApiEvent, ctx) -> Optional[OEPEvent]:
@@ -107,7 +107,7 @@ class OEPDetector(OEPDetectorBase):
             
             # 如果之后出现非解密API，准备OEP检测
             if self._rw_rx_count >= 3 and self._return_to_main >= 5:
-                ctx.transition_oep_state("STABILIZING")
+                GLOBAL_VAR.transition_oep_state("STABILIZING")
                 
                 # 综合评分
                 score = self._score_candidate(
@@ -117,7 +117,7 @@ class OEPDetector(OEPDetectorBase):
                 )
                 
                 if score >= self.threshold:
-                    ctx.transition_oep_state("OEP_FOUND")
+                    GLOBAL_VAR.transition_oep_state("OEP_FOUND")
                     oep_event = OEPEvent(
                         oep=self._last_exec_in_main,
                         score=score,
@@ -128,16 +128,16 @@ class OEPDetector(OEPDetectorBase):
                             f"api={self._api_decrypt_done}",
                         ]
                     )
-                    ctx.record_oep(self._last_exec_in_main, score, oep_event.signals)
+                    GLOBAL_VAR.record_oep(self._last_exec_in_main, score, oep_event.signals)
                     return oep_event
         
         return None
     
     def finalize(self, ctx) -> list:
         """返回最终OEP候选列表"""
-        if ctx.oep:
-            return [{'address': ctx.oep, 'score': 100, 'state': ctx.oep_state}]
+        if GLOBAL_VAR.oep:
+            return [{'address': GLOBAL_VAR.oep, 'score': 100, 'state': GLOBAL_VAR.oep_state}]
         return [{'address': self._last_exec_in_main, 'score': self._score_candidate(
             self._last_exec_in_main,
             [self._return_to_main, self._rw_rx_count, self._stack_collapse, self._api_decrypt_done]
-        ), 'state': ctx.oep_state}]
+        ), 'state': GLOBAL_VAR.oep_state}]

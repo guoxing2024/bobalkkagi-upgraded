@@ -72,7 +72,7 @@ def hook_api(uc, address, size, user_data):
     rsp=uc.reg_read(UC_X86_REG_RSP)
     rip=uc.reg_read(UC_X86_REG_RIP)
     try:
-        hook_name = ctx.inverse_hook_funcs[address-ctx.hook_region]
+        hook_name = GLOBAL_VAR.inverse_hook_funcs[address-GLOBAL_VAR.hook_region]
         func_name = hook_name.split(".dll_")[1]
         globals()["hook_"+func_name](uc, BobLog, get_register(uc))
     except KeyError as e:
@@ -92,12 +92,12 @@ def hook_block(uc, address, size, user_data):
        if rip in DLL_SETTING.InverseDllFuncs:
             BobLog.info(f"This Function is {DLL_SETTING.InverseDllFuncs[rip]}, RIP : {hex(rip)}")
 
-            if ctx.debug_option:
-                ctx.debug_flag = True
-                ctx.debug_option = False
+            if GLOBAL_VAR.debug_option:
+                GLOBAL_VAR.debug_flag = True
+                GLOBAL_VAR.debug_option = False
 
-            if rip in ctx.breakpoints:
-                ctx.debug_flag = True
+            if rip in GLOBAL_VAR.breakpoints:
+                GLOBAL_VAR.debug_flag = True
 
             exitFlag = globals()["hook_"+DLL_SETTING.InverseDllFuncs[rip].split(".dll_")[1]](uc, BobLog, get_register(uc))
             
@@ -109,8 +109,8 @@ def hook_block(uc, address, size, user_data):
         BobLog.error(f"HOOK Error in hook_block @ 0x{rip:x}: {e}")
         print(f"  ⚠ hook_block error @ 0x{rip:x}: {e}")
 
-    if ctx.debug_flag:
-        ctx.debug_flag = Debugger(uc, BobLog)
+    if GLOBAL_VAR.debug_flag:
+        GLOBAL_VAR.debug_flag = Debugger(uc, BobLog)
     
     
 def hook_code(uc, address, size, user_data):
@@ -128,12 +128,12 @@ def hook_code(uc, address, size, user_data):
        if rip in DLL_SETTING.InverseDllFuncs:
             BobLog.info(f"This Function is {DLL_SETTING.InverseDllFuncs[rip]}, RIP : {hex(rip)}")
             
-            if ctx.debug_option:
-                ctx.debug_flag = True
-                ctx.debug_option = False
+            if GLOBAL_VAR.debug_option:
+                GLOBAL_VAR.debug_flag = True
+                GLOBAL_VAR.debug_option = False
 
-            if rip in ctx.breakpoints:
-                ctx.debug_flag = True
+            if rip in GLOBAL_VAR.breakpoints:
+                GLOBAL_VAR.debug_flag = True
 
             exitFlag=globals()['hook_'+DLL_SETTING.InverseDllFuncs[rip].split('.dll_')[1]](uc, BobLog, get_register(uc))
         
@@ -145,8 +145,8 @@ def hook_code(uc, address, size, user_data):
         BobLog.error(f"HOOK Error in hook_code @ 0x{rip:x}: {e}")
         print(f"  ⚠ hook_code error @ 0x{rip:x}: {e}")
 
-    if ctx.debug_flag:
-        ctx.debug_flag = Debugger(uc, BobLog)
+    if GLOBAL_VAR.debug_flag:
+        GLOBAL_VAR.debug_flag = Debugger(uc, BobLog)
     
     
 
@@ -168,12 +168,12 @@ def InsPatch(uc, address, size, user_data):
             uc.reg_write(UC_X86_REG_RIP, nrip)
             uc.reg_write(UC_X86_REG_RSP, nrsp)
             uc.reg_write(UC_X86_REG_EFLAGS, nflags)
-            uc.hook_del(ctx.hook_int)
+            uc.hook_del(GLOBAL_VAR.hook_int)
 
 def InsertHookFlag(uc):
     for key in HookFuncs:
         address =DLL_SETTING.DllFuncs[key]
-        offset = ctx.hook_region-address-5 + HookFuncs[key]
+        offset = GLOBAL_VAR.hook_region-address-5 + HookFuncs[key]
         byteOffset=struct.pack('<Q',offset)
         jmp = struct.pack('<B',0xE9)
         flagInstruction = (jmp+byteOffset)[:-1]
@@ -222,11 +222,11 @@ def unpack(program: str,  verbose: bool, mode:str, oep: bool):
     EP = pe.OPTIONAL_HEADER.AddressOfEntryPoint #Entry Point
     uc.mem_map(StackLimit, StackBase - StackLimit, UC_PROT_ALL) #스택 공간
     
-    PE_Loader(uc, program, ctx.image_base, oep)
-    PE_Loader(uc, "user32.dll", ctx.dll_end, False)
+    PE_Loader(uc, program, GLOBAL_VAR.image_base, oep)
+    PE_Loader(uc, "user32.dll", GLOBAL_VAR.dll_end, False)
     setUpStructure(uc)
     
-    uc.mem_map(ctx.hook_region, 0x1000, UC_PROT_ALL)
+    uc.mem_map(GLOBAL_VAR.hook_region, 0x1000, UC_PROT_ALL)
     
     InvDllDict() # 함수 이름 : 주소 , -> 주소 : 이름
 
@@ -238,8 +238,8 @@ def unpack(program: str,  verbose: bool, mode:str, oep: bool):
     InvHookFuncDict()
     
     # Apply CRC integrity check bypass
-    if ctx.themida_section and ctx.boot_section:
-        crc_patches = crc_bypass_post_load(uc, ctx.themida_section, ctx.boot_section, ctx.image_base)
+    if GLOBAL_VAR.themida_section and GLOBAL_VAR.boot_section:
+        crc_patches = crc_bypass_post_load(uc, GLOBAL_VAR.themida_section, GLOBAL_VAR.boot_section, GLOBAL_VAR.image_base)
     else:
         crc_patches = 0
     
@@ -253,25 +253,25 @@ def unpack(program: str,  verbose: bool, mode:str, oep: bool):
         uc.hook_add(UC_HOOK_CODE, hook_code)
         verbose = True
     elif mode == 'b':
-        ctx.debug_option = False # hook block mode can't debug
+        GLOBAL_VAR.debug_option = False # hook block mode can't debug
         verbose = True
         uc.hook_add(UC_HOOK_BLOCK, hook_block) 
     elif mode == 'f':
-        uc.hook_add(UC_HOOK_BLOCK, hook_api, None, ctx.hook_region, ctx.hook_region + 0x1000)
+        uc.hook_add(UC_HOOK_BLOCK, hook_api, None, GLOBAL_VAR.hook_region, GLOBAL_VAR.hook_region + 0x1000)
     
     
     setup_logger(uc, BobLog, verbose)
     
-    uc.reg_write(UC_X86_REG_RAX, ctx.image_base+EP)
+    uc.reg_write(UC_X86_REG_RAX, GLOBAL_VAR.image_base+EP)
     uc.reg_write(UC_X86_REG_RBX, 0x0)
     uc.reg_write(UC_X86_REG_RCX, PebBase)
-    uc.reg_write(UC_X86_REG_RDX, ctx.image_base+EP)
+    uc.reg_write(UC_X86_REG_RDX, GLOBAL_VAR.image_base+EP)
     uc.reg_write(UC_X86_REG_R8, PebBase)
-    uc.reg_write(UC_X86_REG_R9, ctx.image_base+EP)
+    uc.reg_write(UC_X86_REG_R9, GLOBAL_VAR.image_base+EP)
     uc.reg_write(UC_X86_REG_EFLAGS, 0x244)
     
     try:
-        uc.emu_start(ctx.image_base + EP, ctx.image_end)
+        uc.emu_start(GLOBAL_VAR.image_base + EP, GLOBAL_VAR.image_end)
     except UcError as e:
         print("\033[96m{0:=^100}\033[0m".format("[ Hook End ]"))
         BobLog.error(f"{e}")
@@ -287,8 +287,8 @@ def unpack(program: str,  verbose: bool, mode:str, oep: bool):
     print(f"\033[93m[{end}] Unpacking done...\033[0m")
     print(f"\033[93mUnpacking Runtime: [{end-start}]\033[0m")
     
-    dump = uc.mem_read(ctx.image_base, ctx.image_end - ctx.image_base)
-    filename = ctx.sample_path.split('\\')[-1].split('.')[0] + '.dump'
+    dump = uc.mem_read(GLOBAL_VAR.image_base, GLOBAL_VAR.image_end - GLOBAL_VAR.image_base)
+    filename = GLOBAL_VAR.sample_path.split('\\')[-1].split('.')[0] + '.dump'
     saveDumpfile(filename, dump)
     return dump, OEP
 

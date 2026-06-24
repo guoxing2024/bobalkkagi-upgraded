@@ -43,9 +43,9 @@ def run_Bobalkkagi(
     oep = checkInput(oep)
     debugger =checkInput(debugger)
     
-    ctx.debug_option = debugger
-    ctx.sample_path = protectedFile
-    ctx.directory_path = dllPath
+    GLOBAL_VAR.debug_option = debugger
+    GLOBAL_VAR.sample_path = protectedFile
+    GLOBAL_VAR.directory_path = dllPath
 
     dump, OrignalEntryPoint = unpack(protectedFile, verbose, mode, oep)
     unwrap(dump, OrignalEntryPoint)

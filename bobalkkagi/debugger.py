@@ -1,4 +1,4 @@
-from .globalValue import DLL_SETTING
+from .globalValue import GLOBAL_VAR,  DLL_SETTING
 from .logger import regis
 from .util import Devide8Bytes, ViewMemory
 
@@ -12,7 +12,7 @@ def Debugger(uc: object, BobLog: object) -> bool:
         ud = input("UNICORN DEBUG > ").lower()
 
         if ud == 'q': #quit 
-            ctx.debug_option = False
+            GLOBAL_VAR.debug_option = False
             print("FINISHED DEBUG")
             return False
 
@@ -99,13 +99,13 @@ def Debugger(uc: object, BobLog: object) -> bool:
                 except Exception as e:
                     print(f"[Error] {e}")
                     continue
-            ctx.breakpoints.append(addr)
+            GLOBAL_VAR.breakpoints.append(addr)
 
         elif ud == 'bl':
-            PrintBreakPoint(ctx.breakpoints)
+            PrintBreakPoint(GLOBAL_VAR.breakpoints)
         
         elif ud == 'd':
-            ctx.breakpoints.pop(0)
+            GLOBAL_VAR.breakpoints.pop(0)
 
         elif ud =='h':
             PrintDbgHelp()

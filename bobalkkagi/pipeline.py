@@ -55,8 +55,8 @@ class Pipeline:
         try:
             # 绑定上下文（兼容旧代码）
             set_context(self.ctx)
-            ctx.sample_path = self.sample_path
-            ctx.directory_path = self.dll_path
+            self.ctx.sample_path = self.sample_path
+            self.ctx.directory_path = self.dll_path
             
             # 阶段1: 加载
             self._stage_load()
@@ -111,16 +111,16 @@ class Pipeline:
         DLL_SETTING.InverseLoadedDll = {}
         HEAP_HANDLE.HeapHandle = [0x000001E9E3850000]
         HEAP_HANDLE.HeapHandleSize = 1
-        ctx.image_base = 0x140000000
-        ctx.image_end = 0x140000000
-        ctx.dll_end = 0x7FF000000000
-        ctx.allocate_chunk_end = 0x0000020000000000
-        ctx.section_info = []
-        ctx.inverse_hook_funcs = {}
-        ctx.log_queue = []
-        ctx.text_section = []
-        ctx.themida_section = []
-        ctx.boot_section = []
+        self.ctx.image_base = 0x140000000
+        self.ctx.image_end = 0x140000000
+        self.ctx.dll_end = 0x7FF000000000
+        self.ctx.allocate_chunk_end = 0x0000020000000000
+        self.ctx.section_info = []
+        self.ctx.inverse_hook_funcs = {}
+        self.ctx.log_queue = []
+        self.ctx.text_section = []
+        self.ctx.themida_section = []
+        self.ctx.boot_section = []
         
         # 执行 Unicorn 模拟
         verbose = False
@@ -134,7 +134,7 @@ class Pipeline:
         
         if oep is None or oep == 0:
             # 使用备用OEP检测
-            oep = self.ctx.entry_point or ctx.image_base
+            oep = self.ctx.entry_point or self.ctx.image_base
         
         self.ctx.dump_path = os.path.join(
             os.path.dirname(self.sample_path),
@@ -144,6 +144,9 @@ class Pipeline:
             f.write(dump)
         
         print(f"  加载完成! OEP = 0x{oep:x}")
+        
+        # Store OEP in context
+        self.ctx.oep = oep
     
     def _stage_emulate(self):
         """阶段2: 安装追踪器 (EventBus模式)"""

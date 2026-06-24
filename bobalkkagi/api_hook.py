@@ -3,7 +3,7 @@ from unicorn.x86_const import *
 
 from .loader import PE_Loader
 from .reflector import REFLECTOR
-from .globalValue import DLL_SETTING, HEAP_HANDLE, InvDllDict
+from .globalValue import GLOBAL_VAR,  DLL_SETTING, HEAP_HANDLE, InvDllDict
 from .util import *
 from . import api_recorder
 
@@ -78,7 +78,7 @@ def hook_GetModuleFileNameW(uc, log, regs):
     
     set_register(regs)
     if not REGS.rcx:
-        path = os.path.abspath(ctx.sample_path)
+        path = os.path.abspath(GLOBAL_VAR.sample_path)
     else:
         try:
             module_name = DLL_SETTING.LoadedDll[REGS.rcx]
@@ -134,7 +134,7 @@ def hook_LoadLibraryA(uc, log, regs):
     api_recorder.record(dllName, "__load__")
     
     if dllName not in DLL_SETTING.LoadedDll:
-        PE_Loader(uc, dllName, ctx.dll_end)
+        PE_Loader(uc, dllName, GLOBAL_VAR.dll_end)
         InvDllDict()
 
     d_address = DLL_SETTING.LoadedDll[dllName]
@@ -262,7 +262,7 @@ def hook_GetCommandLineA(uc, log, regs):
     
     set_register(regs)
 
-    path = "\""+os.path.abspath(ctx.sample_path)+"\""
+    path = "\""+os.path.abspath(GLOBAL_VAR.sample_path)+"\""
     
     log.warning(f"HOOK_API_CALL : GetCommandLineA, path : {path}")
     
@@ -282,13 +282,13 @@ def hook_ZwAllocateVirtualMemory(uc, log, regs):
     
     page_size = 4 * 1024
     if REGS.rcx == 0:
-        offset = ctx.allocate_chunk_end
+        offset = GLOBAL_VAR.allocate_chunk_end
     else:
         offset = REGS.rcx
 
     aligned_size = align(REGS.rdx, page_size)
     uc.mem_map(offset, aligned_size ,privilege[REGS.r9])
-    ctx.allocate_chunk_end = offset + aligned_size
+    GLOBAL_VAR.allocate_chunk_end = offset + aligned_size
     AllocChunk[offset] = aligned_size
     log.warning(f"HOOK_API_CALL : ZwAllocateVirtualMemory, Address : {hex(offset)}, Size : {hex(REGS.rdx)}, Privilege : {hex(REGS.r9)}")
     uc.mem_write(uc.reg_read(UC_X86_REG_RDX),struct.pack('<Q',offset))
@@ -464,7 +464,7 @@ def hook_VirtualProtect(uc, log, regs):
         uc.mem_protect(align(REGS.rcx), align(REGS.rdx), privilege[REGS.r8])
     
     oldPriv=0
-    for section in ctx.section_info:
+    for section in GLOBAL_VAR.section_info:
         if (REGS.rcx - section[1]) >= 0 and (REGS.rcx - section[1]) < section[2] :
             oldPriv = section[3]
             break         
@@ -904,13 +904,13 @@ def hook_ZwCreateSection(uc, log, regs):
 def hook_ZwMapViewOfSection(uc, log, regs):
     """ZwMapViewOfSection - 在分配块中映射内存"""
     set_register(regs)
-    offset = ctx.allocate_chunk_end
+    offset = GLOBAL_VAR.allocate_chunk_end
     size = 0x10000  # 64KB default
     try:
         uc.mem_map(offset, size, UC_PROT_ALL)
     except:
         pass
-    ctx.allocate_chunk_end = offset + size
+    GLOBAL_VAR.allocate_chunk_end = offset + size
     if REGS.rdx:
         uc.mem_write(REGS.rdx, struct.pack('<Q', offset))
     if REGS.r9:
@@ -1060,7 +1060,7 @@ def hook_LdrLoadDll(uc, log, regs):
                         uc.mem_write(REGS.r8, struct.pack('<Q', base))
                 else:
                     from .loader import PE_Loader
-                    PE_Loader(uc, dll_name, ctx.dll_end)
+                    PE_Loader(uc, dll_name, GLOBAL_VAR.dll_end)
     except Exception as e:
         log.warning(f"HOOK_API_CALL : LdrLoadDll - error: {e}")
     

@@ -199,12 +199,8 @@ def agent_unpack(
         # Build pipeline
         pipe = Pipeline(file_path, dll_path)
         
-        # Configure based on mode
-        if mode in ("aggressive_crc", "aggressive"):
-            pipe.crc_mode = "aggressive"
-        
         # Execute
-        result = pipe.run(timeout=timeout)
+        result = pipe.run()
         
         elapsed = (datetime.now() - start_time).total_seconds()
         

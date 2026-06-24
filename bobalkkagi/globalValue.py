@@ -97,18 +97,28 @@ class _GlobalVarProxy:
         'FindOEP': True, 'AllocateChunkStart': 0x0000020000000000,
     }
     
-    # 属性名映射: proxy_name → ctx_attribute
+    # 属性名映射: proxy_name → ctx_attribute (双向)
     _map = {
-        'ImageBaseStart': 'image_base', 'ImageBaseEnd': 'image_end',
-        'DllEnd': 'dll_end', 'HookRegion': 'hook_region',
-        'AllocateChunkEnd': 'allocate_chunk_end',
-        'ProtectedFile': 'sample_path', 'DirectoryPath': 'directory_path',
-        'DebugOption': 'debug_option', 'DebugFlag': 'debug_flag',
-        'BreakPoint': 'breakpoints', 'HookInt': 'hook_int',
-        'SectionInfo': 'section_info', 'text': 'text_section',
-        'themida': 'themida_section', 'boot': 'boot_section',
-        'InverseHookFuncs': 'inverse_hook_funcs',
-        'a_queue': 'log_queue', 'queue_size': 'log_queue_size',
+        'ImageBaseStart': 'image_base', 'image_base': 'image_base',
+        'ImageBaseEnd': 'image_end', 'image_end': 'image_end',
+        'DllEnd': 'dll_end', 'dll_end': 'dll_end',
+        'HookRegion': 'hook_region', 'hook_region': 'hook_region',
+        'AllocateChunkEnd': 'allocate_chunk_end', 'allocate_chunk_end': 'allocate_chunk_end',
+        'ProtectedFile': 'sample_path', 'sample_path': 'sample_path',
+        'DirectoryPath': 'directory_path', 'directory_path': 'directory_path',
+        'DebugOption': 'debug_option', 'debug_option': 'debug_option',
+        'DebugFlag': 'debug_flag', 'debug_flag': 'debug_flag',
+        'BreakPoint': 'breakpoints', 'breakpoints': 'breakpoints',
+        'HookInt': 'hook_int', 'hook_int': 'hook_int',
+        'SectionInfo': 'section_info', 'section_info': 'section_info',
+        'text': 'text_section', 'text_section': 'text_section',
+        'themida': 'themida_section', 'themida_section': 'themida_section',
+        'boot': 'boot_section', 'boot_section': 'boot_section',
+        'InverseHookFuncs': 'inverse_hook_funcs', 'inverse_hook_funcs': 'inverse_hook_funcs',
+        'a_queue': 'log_queue', 'log_queue': 'log_queue',
+        'queue_size': 'log_queue_size', 'log_queue_size': 'log_queue_size',
+        'FindOEP': 'find_oep',
+        'AllocateChunkStart': 'allocate_chunk_start',
     }
     
     def __getattr__(self, name):
