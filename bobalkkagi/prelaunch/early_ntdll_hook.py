@@ -121,21 +121,26 @@ def hook_nt_query_info(h_process, h_thread, pid, de_buf=None):
     k32.ReadProcessMemory(h_process, ctypes.c_void_p(target_addr), orig_buf, 14, ctypes.byref(rd))
     orig_14 = bytes(orig_buf)
 
-    # Build shellcode using bytearray (avoids bytes list syntax issues)
+    # Build shellcode using bytearray
     sc = bytearray()
-    # Filter: cmp edx, 7; je +10; cmp edx, 0x1F; je +18; cmp edx, 0x1E; je +26
-    sc += bytes([0x81, 0xFA, 0x07, 0x00, 0x00, 0x00, 0x74, 0x0A,
-                 0x81, 0xFA, 0x1F, 0x00, 0x00, 0x00, 0x74, 0x12,
-                 0x81, 0xFA, 0x1E, 0x00, 0x00, 0x00, 0x74, 0x1A])
-    # Passthrough: original 14 bytes + jmp [rip+0] + addr
-    sc += orig_14
+    # Layout: [filter24] [jmp_back14] [handle07_10] [handle1f_10] [handle1e_6]
+    # Filter: cmp edx, 7 / 0x1F / 0x1E -> je -> handler -> jmp_back -> target+14
+    sc += bytes([
+        0x81, 0xFA, 0x07, 0x00, 0x00, 0x00,  # 0-5: cmp edx, 7
+        0x74, 0x1E,                           # 6-7: je +30 -> handle_07 (byte 38)
+        0x81, 0xFA, 0x1F, 0x00, 0x00, 0x00,  # 8-13: cmp edx, 0x1F
+        0x74, 0x22,                           # 14-15: je +34 -> handle_1f (byte 48)
+        0x81, 0xFA, 0x1E, 0x00, 0x00, 0x00,  # 16-21: cmp edx, 0x1E
+        0x74, 0x26,                           # 22-23: je +38 -> handle_1e (byte 58)
+    ])
+    # jmp [rip+0] -> target_addr+14 (bytes 24-37)
     sc += b'\xff\x25\x00\x00\x00\x00'
     sc += struct.pack('<Q', target_addr + 14)
-    # handle_07: mov [r8], 0; xor eax, eax; ret
+    # handle_07 @ byte 38-47
     sc += bytes([0x49, 0xC7, 0x00, 0x00, 0x00, 0x00, 0x00, 0x31, 0xC0, 0xC3])
-    # handle_1f: mov [r8], 1; xor eax, eax; ret
+    # handle_1f @ byte 48-57
     sc += bytes([0x49, 0xC7, 0x00, 0x01, 0x00, 0x00, 0x00, 0x31, 0xC0, 0xC3])
-    # handle_1e: mov eax, 0xC0000353; ret
+    # handle_1e @ byte 58-63
     sc += bytes([0xB8, 0x53, 0x03, 0x00, 0xC0, 0xC3])
 
     # Write shellcode
