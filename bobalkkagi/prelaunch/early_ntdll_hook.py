@@ -113,8 +113,14 @@ def hook_nt_query_info(h_process, h_thread, pid, de_buf=None):
         print(f"  [EarlyHook] Not found")
         return False
 
+    # Allocate executable memory in target process for shellcode
+    cave = k32.VirtualAllocEx(h_process, None, 0x1000,
+                               0x3000,  # MEM_COMMIT|MEM_RESERVE
+                               0x40)    # PAGE_EXECUTE_READWRITE
+    if not cave:
+        print(f"  [EarlyHook] VirtualAllocEx failed")
+        return False
     target_addr = ntdll_base + func_rva
-    cave = ntdll_base + 0x100000
 
     # Save original first 14 bytes
     orig_buf = (ctypes.c_char * 14)()
