@@ -1,0 +1,106 @@
+# bobalkkagi-upgraded V8.0 完整分析报告
+
+**日期**: 2026-06-24  
+**样本**: 伦伦软件.exe (Themida 3.x, x64)  
+**状态**: V7 Memory Transition + V8 VM Runtime Analysis 完成  
+
+---
+
+## 一、V7 Memory Transition Analyzer
+
+### 执行分布 (32,255,831 指令)
+```
+.boot (0x140885000): 32,255,831 (100%)
+.themida:           0
+.text:              0
+```
+
+### 写入分布
+```
+0x140213000 (.themida): 4096
+0x140214000:            4096
+0x140215000:            4096
+0x140216000:            4096
+0x140217000:            4096
+→ VM scratch space, 整页对齐写入
+```
+
+### API 调用
+- VirtualAlloc: 0 (已注册 hook, 从未触发)
+- VirtualProtect: 仅 DLL 地址
+
+---
+
+## 二、V8 VM Runtime Analyzer
+
+### 统计
+```
+指令总数: 41,469,276
+唯一 RIP: 141
+Handler 数: 17 (clustered)
+采样间隔: 5000
+采样数: 8,293
+```
+
+### Handler 分布 (Top 10)
+```
+H03 @0x140885076: 1447 (17.5%)
+H04 @0x14088507e: 1302 (15.7%)
+H05 @0x140885080:  941 (11.3%)
+H00 @0x1408850fb:  877 (10.6%)
+H08 @0x14088508b:  842 (10.2%)
+H06 @0x140885089:  749 ( 9.0%)
+H01 @0x140885106:  607 ( 7.3%)
+H02 @0x14088510a:  487 ( 5.9%)
+H12 @0x14088515d:  413 ( 5.0%)
+H11 @0x140885175:  123 ( 1.5%)
+```
+
+### VM 状态分析
+```
+VM Stack: 恒定 (0x14fea0, delta=0)
+页面变化: 0 (静态 — 无内容演变)
+Handler 转移: 无固定模式
+```
+
+### 循环检测
+```
+Dispatcher Loop: ✅ 确认
+State Progression: ❌ NO (static)
+Second Hotspot: ❌ NOT FOUND
+```
+
+---
+
+## 三、综合结论
+
+### 已确认
+1. ✅ Unicorn 执行完全停留在 Themida VM Dispatcher
+2. ✅ 17 个 handler 分支构成固定分发循环
+3. ✅ 无状态推进 — VM 工作页内容不变
+4. ✅ 无第二执行热点
+5. ✅ .text 永远未解密
+6. ✅ VirtualAlloc 从未调用
+
+### 当前阶段评级
+```
+架构: 通过
+工程: 通过  
+数据采集: 通过
+VM Runtime 识别: 通过
+Native Transition 识别: 未通过
+OEP 定位: 暂停验收
+PE 重建: 暂停验收
+IAT: 暂停验收
+```
+
+### 根因分析
+Dispatcher 可能处于以下状态之一:
+1. 等待某个未满足的条件 (环境检查/同步对象)
+2. 固定空循环 (初始化未完成)
+3. 需要更多迭代才能推进状态机
+
+### 建议
+- 扩大样本库 (当前仅 1 个样本)
+- 检查 Unicorn Fake PEB/KUSER 完整性
+- 尝试 hook VM dispatcher 出口点
