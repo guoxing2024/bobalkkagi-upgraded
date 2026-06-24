@@ -129,9 +129,9 @@ def hook_nt_query_info(h_process, h_thread, pid, de_buf=None):
         0x81, 0xFA, 0x07, 0x00, 0x00, 0x00,  # 0-5: cmp edx, 7
         0x74, 0x1E,                           # 6-7: je +30 -> handle_07 (byte 38)
         0x81, 0xFA, 0x1F, 0x00, 0x00, 0x00,  # 8-13: cmp edx, 0x1F
-        0x74, 0x22,                           # 14-15: je +34 -> handle_1f (byte 48)
+        0x74, 0x20,                           # 14-15: je +32 -> handle_1f (byte 48)
         0x81, 0xFA, 0x1E, 0x00, 0x00, 0x00,  # 16-21: cmp edx, 0x1E
-        0x74, 0x26,                           # 22-23: je +38 -> handle_1e (byte 58)
+        0x74, 0x22,                           # 22-23: je +34 -> handle_1e (byte 58)
     ])
     # jmp [rip+0] -> target_addr+14 (bytes 24-37)
     sc += b'\xff\x25\x00\x00\x00\x00'
