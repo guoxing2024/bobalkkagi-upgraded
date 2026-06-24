@@ -62,9 +62,17 @@ EXCEPTION_ILLEGAL_INSTRUCTION = 0xC000001D
 
 MEM_COMMIT = 0x1000
 MEM_RESERVE = 0x2000
+# Protection constants
+PAGE_NOACCESS = 0x01
+PAGE_EXECUTE_READ = 0x20
 PAGE_EXECUTE_READWRITE = 0x40
 PAGE_READWRITE = 0x04
 PAGE_READONLY = 0x02
+
+# VirtualProtectEx prototype
+kernel32.VirtualProtectEx.argtypes = [wintypes.HANDLE, wintypes.LPVOID,
+    wintypes.SIZE_T, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)]
+kernel32.VirtualProtectEx.restype = wintypes.BOOL
 
 # Debug event codes
 EXCEPTION_DEBUG_EVENT = 1
@@ -391,9 +399,18 @@ class DebuggerBackend(IExecutionBackend):
         self._image_end = 0
         self._oep = 0
         self._running = False
-        self._loaded_modules: Dict[str, int] = {}  # name → base addr
+        self._loaded_modules: Dict[str, int] = {}
         self._rip_history: List[int] = []
         self._api_calls = 0
+
+        # P3: Magicmida-style memory trap
+        self._text_base = 0
+        self._text_size = 0
+        self._text_original_protect = PAGE_EXECUTE_READ
+        self._tls_entries: List[int] = []  # detected TLS callback addresses
+        self._trap_active = False
+        # P3: instruction-scan IAT cache
+        self._scanned_iat: Dict[int, str] = {}  # addr → "dll!func"
 
     # ===== 元信息 =====
 
@@ -487,30 +504,18 @@ class DebuggerBackend(IExecutionBackend):
             return False
 
     def install_hooks(self, ctx) -> bool:
-        """
-        调试器后端的「钩子」安装:
-          1. 恢复进程执行 (ResumeThread → 让 loader 初始化)
-          2. WaitForDebugEvent 捕获初始 CREATE_PROCESS_DEBUG_EVENT
-             → 获取 image_base 和 image_end
-          3. WaitForDebugEvent 捕获系统 DLL 加载
-             → 记录模块基址
-          4. 在 OEP 位置设置 0xCC 断点 (可选)
-          5. 恢复执行 + 等待 EXCEPTION_BREAKPOINT 到达
-        """
+        """Magicmida-style: 初始化调试事件 + 设置内存陷阱"""
         if not self._process_handle:
             return False
 
-        # Step 1: Resume main thread (进程从入口点开始执行)
+        # Resume main thread
         kernel32.ResumeThread(self._thread_handle)
 
-        # Step 2: 捕获初始调试事件
         debug_event = DEBUG_EVENT()
-        continue_status = DBG_CONTINUE
-        max_init_events = 50  # 防止 DLL 加载事件过多
         events_processed = 0
 
-        while events_processed < max_init_events and kernel32.WaitForDebugEvent(
-            ctypes.byref(debug_event), 5000  # 5s per event
+        while events_processed < 50 and kernel32.WaitForDebugEvent(
+            ctypes.byref(debug_event), 5000
         ):
             events_processed += 1
             event_code = debug_event.dwDebugEventCode
@@ -519,72 +524,56 @@ class DebuggerBackend(IExecutionBackend):
                 self._image_base = debug_event.u.CreateProcessInfo.lpBaseOfImage or 0
                 self._process_handle = debug_event.u.CreateProcessInfo.hProcess
                 self._thread_handle = debug_event.u.CreateProcessInfo.hThread
-                # 估算 image_end (从 PE headers 读取)
                 self._image_end = self._image_base + self._read_image_size()
-                print(f"  [DebuggerBackend] CREATE_PROCESS: base=0x{self._image_base:x}, end=0x{self._image_end:x}")
+                # Parse .text section
+                self._parse_text_section()
+                print(f"  [DebuggerBackend] CREATE_PROCESS: base=0x{self._image_base:x} text=0x{self._text_base:x}+{self._text_size:x}")
 
             elif event_code == LOAD_DLL_DEBUG_EVENT:
                 dll_name = self._read_dll_name(debug_event)
                 if dll_name:
-                    self._loaded_modules[dll_name.lower()] = \
-                        debug_event.u.LoadDll.lpBaseOfDll or 0
+                    self._loaded_modules[dll_name.lower()] = debug_event.u.LoadDll.lpBaseOfDll or 0
 
             elif event_code == EXCEPTION_DEBUG_EVENT:
                 exc_code = debug_event.u.Exception.ExceptionRecord.ExceptionCode
                 exc_addr = debug_event.u.Exception.ExceptionRecord.ExceptionAddress or 0
                 if exc_code == EXCEPTION_BREAKPOINT:
-                    # 系统断点 (初始断点或用户设置的 0xCC)
                     print(f"  [DebuggerBackend] Initial breakpoint @ 0x{exc_addr:x}")
-                # 继续执行
                 continue_status = DBG_CONTINUE
 
             elif event_code == EXIT_PROCESS_DEBUG_EVENT:
-                print(f"  [DebuggerBackend] Process exited during init")
                 self._running = False
                 break
 
-            kernel32.ContinueDebugEvent(
-                debug_event.dwProcessId,
-                debug_event.dwThreadId,
-                continue_status
-            )
+            kernel32.ContinueDebugEvent(debug_event.dwProcessId, debug_event.dwThreadId, DBG_CONTINUE)
 
-        print(f"  [DebuggerBackend] Init events processed: {events_processed}, modules loaded: {len(self._loaded_modules)}")
+        # Magicmida: 设置内存陷阱 — .text 段设为 PAGE_NOACCESS
+        self._setup_memory_trap()
+        print(f"  [DebuggerBackend] Magicmida trap active: .text @ 0x{self._text_base:x} ({self._text_size} bytes) → PAGE_NOACCESS")
         return True
 
     def execute(self, ctx) -> ExecutionResult:
-        """
-        执行目标进程直到:
-          1. 检测到 OEP (Rip 回归主映像 + RW→RX转换)
-          2. 进程退出
-          3. 超时
-        """
+        """Magicmida-style: 异常驱动的 OEP/TLS 捕获 + 反反调试"""
         if not self._running:
             return ExecutionResult(success=False, backend=self.display_name,
-                                   stage=ExecutionStage.ERROR,
-                                   error_message="Process not running")
+                                   stage=ExecutionStage.ERROR, error_message="Process not running")
 
         start_time = datetime.now()
         debug_event = DEBUG_EVENT()
-        self._rip_history = []
-        api_call_count = 0
-        rw_rx_transitions = 0
-        timeout_ms = self._timeout * 1000
+        self._tls_entries.clear()
 
         while True:
-            # 超时检查
             elapsed = (datetime.now() - start_time).total_seconds()
             if elapsed > self._timeout:
                 print(f"  [DebuggerBackend] Timeout ({self._timeout}s)")
-                self._oep = self._rip_history[-1] if self._rip_history else 0
+                if not self._oep:
+                    self._oep = self._rip_history[-1] if self._rip_history else 0
                 break
 
-            # 等待调试事件 (每次最多等 1 秒)
             if not kernel32.WaitForDebugEvent(ctypes.byref(debug_event), 1000):
-                # 超时无事件 → 检查是否仍在运行
                 exit_code = wintypes.DWORD()
                 if kernel32.GetExitCodeProcess(self._process_handle, ctypes.byref(exit_code)):
-                    if exit_code.value != 259:  # STILL_ACTIVE
+                    if exit_code.value != 259:
                         print(f"  [DebuggerBackend] Process exited: code={exit_code.value}")
                         break
                 continue
@@ -596,41 +585,61 @@ class DebuggerBackend(IExecutionBackend):
                 exc = debug_event.u.Exception
                 exc_code = exc.ExceptionRecord.ExceptionCode
                 exc_addr = exc.ExceptionRecord.ExceptionAddress or 0
+                thread_id = debug_event.dwThreadId
+                thread_handle = kernel32.OpenThread(THREAD_GET_CONTEXT | THREAD_SUSPEND_RESUME, False, thread_id)
 
-                if exc_code == EXCEPTION_BREAKPOINT:
-                    # 可能是 Themida API hook 或我们的断点
-                    # → 获取当前 Rip 并检查是否在目标模块中
-                    ctx_thread = self._get_thread_context()
-                    rip = ctx_thread.Rip if ctx_thread else exc_addr
-                    self._rip_history.append(rip)
-
-                    # OEP 检测: Rip 在主模块范围内
-                    if self._image_base <= rip < self._image_end:
-                        self._oep = rip
-
+                # P3: 反反调试 — 拦截 NtSetInformationThread(ThreadHideFromDebugger)
+                if self._handle_anti_debug_syscall(exc_addr, thread_handle):
                     continue_status = DBG_CONTINUE
+                    if thread_handle: kernel32.CloseHandle(thread_handle)
+                    kernel32.ContinueDebugEvent(debug_event.dwProcessId, thread_id, continue_status)
+                    continue
 
-                elif exc_code == EXCEPTION_ACCESS_VIOLATION:
-                    # 可能是 Themedia 内存解密 → 检查保护变更
-                    exc_addr = exc.ExceptionRecord.ExceptionAddress or 0
-                    # Themida 经常在 AV 后解密代码段 (RW→RX)
-                    rw_rx_transitions += 1
-                    self._api_calls += 1
+                # Magicmida: ACCESS_VIOLATION 在 .text 段 → OEP 或 TLS
+                if exc_code == EXCEPTION_ACCESS_VIOLATION and self._is_in_text(exc_addr):
+                    is_tls = self._is_tls_callback(thread_handle)
+
+                    if is_tls:
+                        self._tls_entries.append(exc_addr)
+                        print(f"  [DebuggerBackend] TLS callback: 0x{exc_addr:x} (total={len(self._tls_entries)})")
+                        # 临时恢复该页 → 单步执行 → 再次设为 NOACCESS
+                        self._restore_page(exc_addr)
+                        self._single_step_then_trap(thread_handle, debug_event, thread_id, exc_addr)
+                        if thread_handle: kernel32.CloseHandle(thread_handle)
+                        continue
+                    else:
+                        # 不是 TLS → 就是 OEP！
+                        self._oep = exc_addr
+                        print(f"  [DebuggerBackend] ✅ OEP captured via memory trap: 0x{self._oep:x}")
+                        # 恢复整个 .text 段保护
+                        self._restore_text_protection()
+                        self._trap_active = False
+                        if thread_handle: kernel32.CloseHandle(thread_handle)
+                        # P3: 指令扫描 IAT
+                        self._scan_iat_from_oep()
+                        break
+
+                elif exc_code == EXCEPTION_BREAKPOINT:
+                    # Anti-debug: check if it's NtSetInformationThread call
+                    ctx_t = self._get_thread_context_for(thread_handle)
+                    rip = ctx_t.Rip if ctx_t else exc_addr
+                    self._rip_history.append(rip)
+                    if self._image_base <= rip < self._image_end:
+                        if not self._oep:
+                            self._oep = rip
                     continue_status = DBG_CONTINUE
 
                 elif exc_code == EXCEPTION_SINGLE_STEP:
                     continue_status = DBG_CONTINUE
 
+                if thread_handle: kernel32.CloseHandle(thread_handle)
+
             elif event_code == LOAD_DLL_DEBUG_EVENT:
                 dll_name = self._read_dll_name(debug_event)
                 if dll_name:
-                    self._loaded_modules[dll_name.lower()] = \
-                        debug_event.u.LoadDll.lpBaseOfDll or 0
-                    # 记录 DLL 加载 (可能是 LoadLibrary 调用)
+                    ld = debug_event.u.LoadDll
+                    self._loaded_modules[dll_name.lower()] = ld.lpBaseOfDll or 0
                     self._api_calls += 1
-                continue_status = DBG_CONTINUE
-
-            elif event_code == UNLOAD_DLL_DEBUG_EVENT:
                 continue_status = DBG_CONTINUE
 
             elif event_code == EXIT_PROCESS_DEBUG_EVENT:
@@ -638,34 +647,13 @@ class DebuggerBackend(IExecutionBackend):
                 self._running = False
                 break
 
-            elif event_code == EXIT_THREAD_DEBUG_EVENT:
+            elif event_code in (EXIT_THREAD_DEBUG_EVENT, CREATE_THREAD_DEBUG_EVENT,
+                               UNLOAD_DLL_DEBUG_EVENT, OUTPUT_DEBUG_STRING_EVENT):
                 continue_status = DBG_CONTINUE
 
-            elif event_code == CREATE_THREAD_DEBUG_EVENT:
-                continue_status = DBG_CONTINUE
+            kernel32.ContinueDebugEvent(debug_event.dwProcessId, debug_event.dwThreadId, continue_status)
 
-            elif event_code == OUTPUT_DEBUG_STRING_EVENT:
-                continue_status = DBG_CONTINUE
-
-            # 更新上下文
-            ctx.image_base = self._image_base
-            ctx.image_end = self._image_end
-
-            # OEP 已找到 → 可以终止（但让进程继续跑完也行）
-            if self._oep and rw_rx_transitions > 5:
-                # OEP 已稳定检测到，挂起进程准备 dump
-                print(f"  [DebuggerBackend] OEP candidate: 0x{self._oep:x} (transitions={rw_rx_transitions})")
-                break
-
-            kernel32.ContinueDebugEvent(
-                debug_event.dwProcessId,
-                debug_event.dwThreadId,
-                continue_status
-            )
-
-        # 挂起所有线程准备 dump
         self._suspend_all_threads()
-
         elapsed_total = (datetime.now() - start_time).total_seconds()
 
         result = ExecutionResult(
@@ -685,15 +673,13 @@ class DebuggerBackend(IExecutionBackend):
 
         if self._oep:
             result.diagnosis = (
-                f"Debugger execution completed. OEP=0x{self._oep:x}, "
-                f"modules={len(self._loaded_modules)}, api_calls≈{self._api_calls}"
+                f"Magicmida OEP capture: 0x{self._oep:x}. "
+                f"TLS entries={len(self._tls_entries)}, modules={len(self._loaded_modules)}, "
+                f"scanned IAT={len(self._scanned_iat)}"
             )
         else:
             result.warnings.append("oep_not_found")
-            result.diagnosis = (
-                f"Debugger ran for {elapsed_total:.1f}s but did not detect OEP. "
-                f"Try unicorn backend as fallback, or increase timeout."
-            )
+            result.diagnosis = f"Debugger ran {elapsed_total:.1f}s, OEP not captured. Try unicorn backend."
 
         return result
 
@@ -779,15 +765,324 @@ class DebuggerBackend(IExecutionBackend):
 
     # ===== 内部辅助方法 =====
 
-    def _get_thread_context(self) -> Optional[CONTEXT]:
-        """获取主线程 x64 上下文"""
-        if not self._thread_handle:
+    def _get_thread_context_for(self, thread_handle) -> Optional[CONTEXT]:
+        """获取指定线程的 x64 上下文"""
+        if not thread_handle:
             return None
         ctx = CONTEXT()
         ctx.ContextFlags = CONTEXT_FULL
-        if kernel32.GetThreadContext(self._thread_handle, ctypes.byref(ctx)):
+        if kernel32.GetThreadContext(thread_handle, ctypes.byref(ctx)):
             return ctx
         return None
+
+    # ===== P3: Magicmida 内存陷阱 =====
+
+    def _parse_text_section(self):
+        """解析 PE 头的 .text 段信息"""
+        if not self._process_handle or not self._image_base:
+            return
+        try:
+            buf = (ctypes.c_byte * 0x1000)()
+            br = wintypes.SIZE_T(0)
+            if not kernel32.ReadProcessMemory(self._process_handle, ctypes.c_void_p(self._image_base), buf, 0x1000, ctypes.byref(br)):
+                return
+            data = bytes(buf)
+            pe_off = struct.unpack_from('<I', data, 0x3C)[0]
+            num_sec = struct.unpack_from('<H', data, pe_off + 6)[0]
+            oh = pe_off + 24
+            magic = struct.unpack_from('<H', data, oh)[0]
+            opt_hdr_size = struct.unpack_from('<H', data, pe_off + 20)[0]
+            sec_offset = oh + opt_hdr_size
+            for i in range(num_sec):
+                s = sec_offset + i * 40
+                name = data[s:s+8].rstrip(b'\x00').decode('ascii', errors='replace')
+                vsize = struct.unpack_from('<I', data, s+8)[0]
+                vaddr = struct.unpack_from('<I', data, s+12)[0]
+                if name in ('.text', 'UPX0') or (name == '' and i == 0):
+                    self._text_base = self._image_base + vaddr
+                    self._text_size = vsize
+                    if self._text_size == 0:
+                        self._text_size = 0x1000
+                    print(f"  [DebuggerBackend] .text section: name='{name}' base=0x{self._text_base:x} size=0x{self._text_size:x}")
+                    return
+        except:
+            pass
+        # Fallback: use first 64KB
+        self._text_base = self._image_base + 0x1000
+        self._text_size = 0x10000
+
+    def _setup_memory_trap(self):
+        """设置内存陷阱：.text 段 → PAGE_NOACCESS"""
+        if not self._text_base or not self._process_handle:
+            return
+        old = wintypes.DWORD()
+        ok = kernel32.VirtualProtectEx(
+            self._process_handle,
+            ctypes.c_void_p(self._text_base),
+            self._text_size,
+            PAGE_NOACCESS,
+            ctypes.byref(old)
+        )
+        self._text_original_protect = old.value if ok else PAGE_EXECUTE_READ
+        self._trap_active = True
+
+    def _is_in_text(self, addr: int) -> bool:
+        """检查地址是否在 .text 段"""
+        return self._text_base <= addr < self._text_base + self._text_size
+
+    def _is_tls_callback(self, thread_handle) -> bool:
+        """Magicmida: 区分 TLS 回调和真正的 OEP
+
+        判定逻辑:
+          1. 读取线程栈 (RSP 附近)
+          2. 检查返回地址: 如果返回地址指向非主模块段 (Themida壳段) → 可能是TLS
+          3. 检查栈参数: TLS 回调有固定签名 (PVOID DllHandle, DWORD Reason, PVOID Reserved)
+        """
+        ctx = self._get_thread_context_for(thread_handle)
+        if not ctx:
+            return False
+        rsp = ctx.Rsp
+
+        try:
+            # 读取 RSP 开始的 32 字节栈数据
+            stack_data = self.read_memory(rsp, 32)
+            if len(stack_data) < 16:
+                return False
+
+            # 返回地址在 RSP[0]
+            ret_addr = struct.unpack_from('<Q', stack_data, 0)[0]
+
+            # 如果返回地址在主模块 .text 段内且不是 .themida/.boot 段 → 这不是 TLS
+            # （真正的 OEP 返回地址指向正常代码）
+            if self._image_base <= ret_addr < self._image_end:
+                # 检查是否在 .themida 或 .boot 段
+                for dll_name, dll_base in self._loaded_modules.items():
+                    if 'ntdll' in dll_name or 'kernel32' in dll_name or 'kernelbase' in dll_name:
+                        if dll_base <= ret_addr < dll_base + 0x200000:
+                            return False
+                return False
+
+            return True  # 返回地址异常 → TLS
+        except:
+            return False
+
+    def _restore_page(self, addr: int):
+        """临时恢复单页保护为可执行"""
+        page_addr = addr & ~0xFFF
+        old = wintypes.DWORD()
+        kernel32.VirtualProtectEx(
+            self._process_handle,
+            ctypes.c_void_p(page_addr),
+            0x1000,
+            PAGE_EXECUTE_READ,
+            ctypes.byref(old)
+        )
+
+    def _single_step_then_trap(self, thread_handle, debug_event, thread_id, addr: int):
+        """单步执行TLS回调，然后重新设置陷阱"""
+        # Set TF (Trap Flag) in EFLAGS
+        ctx = self._get_thread_context_for(thread_handle)
+        if ctx:
+            ctx.EFlags |= 0x100  # TF bit
+            kernel32.SetThreadContext(thread_handle, ctypes.byref(ctx))
+
+        # Continue execution → will hit EXCEPTION_SINGLE_STEP
+        kernel32.ContinueDebugEvent(debug_event.dwProcessId, thread_id, DBG_CONTINUE)
+
+        # Wait for the single-step event
+        step_event = DEBUG_EVENT()
+        if kernel32.WaitForDebugEvent(ctypes.byref(step_event), 1000):
+            kernel32.ContinueDebugEvent(step_event.dwProcessId, step_event.dwThreadId, DBG_CONTINUE)
+
+        # Re-set PAGE_NOACCESS on this page
+        page_addr = addr & ~0xFFF
+        old = wintypes.DWORD()
+        kernel32.VirtualProtectEx(
+            self._process_handle,
+            ctypes.c_void_p(page_addr),
+            0x1000,
+            PAGE_NOACCESS,
+            ctypes.byref(old)
+        )
+
+    def _restore_text_protection(self):
+        """恢复 .text 段原始保护"""
+        if not self._text_base:
+            return
+        old = wintypes.DWORD()
+        kernel32.VirtualProtectEx(
+            self._process_handle,
+            ctypes.c_void_p(self._text_base),
+            self._text_size,
+            self._text_original_protect,
+            ctypes.byref(old)
+        )
+        self._trap_active = False
+
+    # ===== P3: Magicmida 指令扫描 IAT =====
+
+    def _scan_iat_from_oep(self):
+        """Magicmida: 从 OEP 扫描 CALL [rip] / JMP [rip] 提取 IAT"""
+        if not self._oep:
+            return
+
+        try:
+            from capstone import Cs, CS_ARCH_X86, CS_MODE_64
+            md = Cs(CS_ARCH_X86, CS_MODE_64)
+            md.detail = True
+
+            # 从 OEP 扫描 64KB
+            scan_size = min(0x10000, self._image_end - self._oep)
+            if scan_size <= 0:
+                return
+            code = self.read_memory(self._oep, scan_size)
+            if not code:
+                return
+
+            iat_slots = []
+            for insn in md.disasm(code, self._oep):
+                # CALL [rip+offset] = FF 15 xx xx xx xx
+                # JMP  [rip+offset] = FF 25 xx xx xx xx
+                if insn.mnemonic in ('call', 'jmp') and len(insn.operands) >= 1:
+                    op = insn.operands[0]
+                    if op.type == 3:  # MEM
+                        target_addr = insn.address + insn.size + op.mem.disp
+                        iat_slots.append(target_addr)
+
+            # 解析每个 IAT slot 指向的 API
+            for slot_addr in iat_slots[:500]:
+                api_name = self._resolve_address_to_api(slot_addr)
+                if api_name:
+                    self._scanned_iat[slot_addr] = api_name
+
+            print(f"  [DebuggerBackend] IAT scan: {len(iat_slots)} slots, {len(self._scanned_iat)} resolved")
+
+        except ImportError:
+            print(f"  [DebuggerBackend] IAT scan skipped (capstone not available)")
+        except Exception as e:
+            print(f"  [DebuggerBackend] IAT scan error: {e}")
+
+    def _resolve_address_to_api(self, slot_addr: int) -> str:
+        """Magicmida: 通过模块导出表解析 IAT 槽位地址 → API 名称"""
+        try:
+            # 读取 IAT 槽位中的实际 API 地址
+            ptr_data = self.read_memory(slot_addr, 8)
+            if len(ptr_data) < 8:
+                return ""
+            api_addr = struct.unpack('<Q', ptr_data)[0]
+            if api_addr == 0 or api_addr < 0x1000:
+                return ""
+
+            # 确定 API 属于哪个 DLL
+            for dll_name, dll_base in sorted(self._loaded_modules.items()):
+                dll_size = 0x200000  # 粗略估计
+                if dll_base <= api_addr < dll_base + dll_size:
+                    # 解析该 DLL 的导出表
+                    func_name = self._lookup_export(dll_name, dll_base, api_addr)
+                    if func_name:
+                        return f"{dll_name}!{func_name}"
+
+            return ""
+        except:
+            return ""
+
+    def _lookup_export(self, dll_name: str, dll_base: int, api_addr: int) -> str:
+        """解析 DLL 导出表 → 根据地址查找函数名"""
+        try:
+            # 读取 DLL PE 头
+            pe_buf = self.read_memory(dll_base, 0x1000)
+            if len(pe_buf) < 0x40:
+                return ""
+            pe_off = struct.unpack_from('<I', pe_buf, 0x3C)[0]
+            if pe_off >= len(pe_buf):
+                return ""
+
+            # 解析可选头 → 导出目录
+            oh = pe_off + 24
+            magic = struct.unpack_from('<H', pe_buf, oh)[0]
+            if magic == 0x20b:  # PE32+
+                export_rva = struct.unpack_from('<I', pe_buf, oh + 112 + 0)[0]
+                export_size = struct.unpack_from('<I', pe_buf, oh + 112 + 4)[0]
+            else:
+                export_rva = struct.unpack_from('<I', pe_buf, oh + 96 + 0)[0]
+                export_size = struct.unpack_from('<I', pe_buf, oh + 96 + 4)[0]
+
+            if export_rva == 0 or export_size == 0:
+                return ""
+
+            # 读取导出表
+            exp_data = self.read_memory(dll_base + export_rva, min(export_size, 0x4000))
+            if len(exp_data) < 40:
+                return ""
+
+            # IMAGE_EXPORT_DIRECTORY
+            num_names = struct.unpack_from('<I', exp_data, 24)[0]
+            num_funcs = struct.unpack_from('<I', exp_data, 20)[0]
+            addr_table_rva = struct.unpack_from('<I', exp_data, 28)[0]
+            name_table_rva = struct.unpack_from('<I', exp_data, 32)[0]
+            ordinal_table_rva = struct.unpack_from('<I', exp_data, 36)[0]
+
+            rva_relative = api_addr - dll_base
+            addr_start = dll_base + addr_table_rva
+
+            for i in range(min(num_funcs, 5000)):
+                func_rva_data = self.read_memory(addr_start + i * 4, 4)
+                if len(func_rva_data) < 4:
+                    continue
+                func_rva = struct.unpack('<I', func_rva_data)[0]
+                if func_rva == 0:
+                    continue
+                if func_rva <= rva_relative <= func_rva + 0x100:
+                    # Find name via ordinal table
+                    if i < num_names:
+                        ord_data = self.read_memory(dll_base + ordinal_table_rva + i * 2, 2)
+                        if len(ord_data) >= 2:
+                            ordinal = struct.unpack('<H', ord_data)[0]
+                            name_ptr_data = self.read_memory(dll_base + name_table_rva + ordinal * 4, 4)
+                            if len(name_ptr_data) >= 4:
+                                name_rva = struct.unpack('<I', name_ptr_data)[0]
+                                name_data = self.read_memory(dll_base + name_rva, 128)
+                                if name_data:
+                                    null_pos = name_data.find(b'\x00')
+                                    if null_pos > 0:
+                                        return name_data[:null_pos].decode('ascii', errors='replace')
+                    # Fallback: ordinal
+                    return f"#{i}"
+        except:
+            pass
+        return ""
+
+    # ===== P3: 反反调试 =====
+
+    def _handle_anti_debug_syscall(self, exc_addr: int, thread_handle) -> bool:
+        """Magicmida: 拦截 NtSetInformationThread(ThreadHideFromDebugger)
+
+        检查异常地址是否在 ntdll 的关键函数中。
+        如果是 → 读取参数, 若为 ThreadHideFromDebugger(0x11) → 跳过调用。
+        Returns: True if intercepted and handled
+        """
+        ntdll_base = self._loaded_modules.get('ntdll.dll')
+        if not ntdll_base:
+            return False
+
+        # NtSetInformationThread 的偏移 (常见 Windows 版本)
+        nt_set_info_offsets = [0x9A300, 0x9A400, 0x9A500, 0xA2000]  # approximate RVA
+        for off in nt_set_info_offsets:
+            if exc_addr == ntdll_base + off:
+                ctx = self._get_thread_context_for(thread_handle)
+                if not ctx:
+                    return False
+                # NtSetInformationThread 第二个参数: ThreadInformationClass → rdx
+                info_class = ctx.Rdx & 0xFFFFFFFF
+                if info_class == 0x11:  # ThreadHideFromDebugger
+                    # 跳过调用: 增加 RIP 越过 syscall 指令
+                    ctx.Rip += 2  # syscall = 2 bytes
+                    ctx.Rax = 0   # STATUS_SUCCESS
+                    kernel32.SetThreadContext(thread_handle, ctypes.byref(ctx))
+                    print(f"  [DebuggerBackend] 🛡 Blocked NtSetInformationThread(ThreadHideFromDebugger)")
+                    return True
+
+        return False
 
     def _suspend_all_threads(self):
         """挂起进程所有线程（准备 dump）"""
