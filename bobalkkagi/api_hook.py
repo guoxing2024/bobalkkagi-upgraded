@@ -456,8 +456,18 @@ def hook_VirtualProtect(uc, log, regs):
     
     
     log.warning(f"HOOK_API_CALL : VirtualProtect, Address : {hex(REGS.rcx)}, Size : {hex(REGS.rdx)}, Privilege : {hex(REGS.r8)}")
+
+    # V6: block execute on .text (Themida decrypts → we keep RW)
+    TEXT_START = 0x140001000
+    TEXT_SIZE  = 0x1a4000  # page-aligned
+    if TEXT_START <= REGS.rcx < TEXT_START + TEXT_SIZE:
+        prot = REGS.r8 & 0xFFFFFFFF
+        if prot & 0x10:
+            log.warning(f"  [V6] Stripping execute from .text VirtualProtect")
+            REGS.r8 = prot & ~0xF0
+            uc.reg_write(UC_X86_REG_R8, REGS.r8)
     
-    if align(REGS.rcx) > REGS.rcx:   
+    if align(REGS.rcx) > REGS.rcx:
         offset =  REGS.rcx - (align(REGS.rcx)- 0x1000)
         uc.mem_protect(align(REGS.rcx)-0x1000, align(REGS.rdx+offset), privilege[REGS.r8])   
     else:   

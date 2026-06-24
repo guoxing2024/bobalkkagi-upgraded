@@ -16,7 +16,7 @@ class FetchTrapOEP:
         self._real_oep = None
         self._trap_set = False
         self._text_start = 0x140001000
-        self._text_size = 0x1a3550
+        self._text_size = 0x1a4000  # page-aligned
 
     def setup(self):
         """设置 .text 段为 RW (不可执行)"""
