@@ -663,8 +663,12 @@ class DebuggerBackend(IExecutionBackend):
 
             kernel32.ContinueDebugEvent(debug_event.dwProcessId, debug_event.dwThreadId, DBG_CONTINUE)
 
-        # Magicmida: 设置内存陷阱 — .text 段设为 PAGE_NOACCESS
+        # Magicmida: 设置内存陷阱
         if getattr(self, '_enable_memory_trap', True):
+            # V5: Early NTDLL hook — before TLS runs
+            from bobalkkagi.prelaunch.early_ntdll_hook import hook_nt_query_info
+            hook_nt_query_info(self._process_handle, self._thread_handle,
+                              self._process_id)
             self._setup_memory_trap()
             print(f"  [DebuggerBackend] Magicmida trap active: .text @ 0x{self._text_base:x} ({self._text_size} bytes) → PAGE_NOACCESS")
         else:
