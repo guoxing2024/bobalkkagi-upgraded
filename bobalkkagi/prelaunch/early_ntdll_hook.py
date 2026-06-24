@@ -73,20 +73,26 @@ def hook_nt_query_info(h_process, h_thread, pid, de_buf=None):
 
     print(f"  [EarlyHook] ntdll @ 0x{ntdll_base:x}")
 
-    # Export lookup
-    ebuf = (ctypes.c_char * 0x8000)()
-    k32.ReadProcessMemory(h_process, ctypes.c_void_p(ntdll_base), ebuf, 0x8000, ctypes.byref(rd))
-    pe_data = bytes(ebuf[:rd.value])
-    if len(pe_data) < 0x200:
-        return False
+    # Read PE header for export directory info
+    pe_buf = (ctypes.c_char * 0x2000)()
+    k32.ReadProcessMemory(h_process, ctypes.c_void_p(ntdll_base), pe_buf, 0x2000, ctypes.byref(rd))
+    pe_data = bytes(pe_buf[:rd.value])
     pe_off = struct.unpack_from('<I', pe_data, 0x3C)[0]
     oh = pe_off + 24
     exp_rva = struct.unpack_from('<I', pe_data, oh + 112)[0]
     exp_size = struct.unpack_from('<I', pe_data, oh + 116)[0]
-    if exp_rva == 0 or exp_rva + exp_size > len(pe_data):
+    if exp_rva == 0:
         return False
 
-    exp = pe_data[exp_rva:exp_rva + min(exp_size, 0x8000)]
+    # Read export section DIRECTLY at ntdll_base + exp_rva
+    rd = ctypes.c_size_t(0)
+    exp_buf = (ctypes.c_char * min(exp_size, 0x20000))()
+    k32.ReadProcessMemory(h_process, ctypes.c_void_p(ntdll_base + exp_rva),
+                          exp_buf, min(exp_size, 0x20000), ctypes.byref(rd))
+    exp = bytes(exp_buf[:rd.value])
+    if len(exp) < 40:
+        return False
+
     num_names = struct.unpack_from('<I', exp, 24)[0]
     addr_rva = struct.unpack_from('<I', exp, 28)[0]
     name_rva = struct.unpack_from('<I', exp, 32)[0]
