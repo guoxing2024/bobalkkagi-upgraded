@@ -710,7 +710,6 @@ class DebuggerBackend(IExecutionBackend):
                 # P3: 反反调试 — 拦截 NtSetInformationThread(ThreadHideFromDebugger)
                 if self._handle_anti_debug_syscall(exc_addr, thread_handle):
                     continue_status = DBG_CONTINUE
-                    if thread_handle: kernel32.CloseHandle(thread_handle)
                     kernel32.ContinueDebugEvent(debug_event.dwProcessId, thread_id, continue_status)
                     # P4: 每轮也执行主动性策略
                     self._handle_anti_debug_proactive(thread_handle)
@@ -726,7 +725,6 @@ class DebuggerBackend(IExecutionBackend):
                         # 临时恢复该页 → 单步执行 → 再次设为 NOACCESS
                         self._restore_page(exc_addr)
                         self._single_step_then_trap(thread_handle, debug_event, thread_id, exc_addr)
-                        if thread_handle: kernel32.CloseHandle(thread_handle)
                         continue
                     else:
                         # 不是 TLS → 就是 OEP！
@@ -735,7 +733,6 @@ class DebuggerBackend(IExecutionBackend):
                         # 恢复整个 .text 段保护
                         self._restore_text_protection()
                         self._trap_active = False
-                        if thread_handle: kernel32.CloseHandle(thread_handle)
                         # P3: 指令扫描 IAT
                         self._scan_iat_from_oep()
                         break
@@ -753,10 +750,9 @@ class DebuggerBackend(IExecutionBackend):
                 elif exc_code == EXCEPTION_SINGLE_STEP:
                     continue_status = DBG_CONTINUE
 
-                if thread_handle: kernel32.CloseHandle(thread_handle)
+                    continue_status = DBG_CONTINUE
 
             elif event_code == LOAD_DLL_DEBUG_EVENT:
-                dll_name = self._read_dll_name(debug_event)
                 if dll_name:
                     ld = debug_event.u.LoadDll
                     self._loaded_modules[dll_name.lower()] = ld.lpBaseOfDll or 0
@@ -990,9 +986,9 @@ class DebuggerBackend(IExecutionBackend):
                     return
         except:
             pass
-        # Fallback: use first 64KB
+        # Fallback: use first executable section
         self._text_base = self._image_base + 0x1000
-        self._text_size = 0x10000
+        self._text_size = 0x200000  # 2MB — cover entire first code section (real size ~1.7MB)
 
     def _setup_memory_trap(self):
         """设置内存陷阱：.text 段 → PAGE_NOACCESS"""
