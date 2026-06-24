@@ -113,7 +113,7 @@ ESSENTIAL_IMPORTS = {
         "RegOpenKeyExW", "RegQueryValueExW", "RegCloseKey",
         "GetUserNameW", "LookupAccountSidW",
     ],
-    "shell32.dll": ["ShellExecuteW", "SHGetFolderPathW"],
+    "SHELL32.dll": ["ShellExecuteW", "SHGetFolderPathW"],
     "gdi32.dll": [
         "GetStockObject", "DeleteObject", "SelectObject",
         "CreateSolidBrush", "DeleteDC", "CreateCompatibleDC",
