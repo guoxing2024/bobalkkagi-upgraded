@@ -2,7 +2,7 @@
 
 # Bobalkkagi-Upgraded Next Generation Architecture
 
-Version: 2.0
+Version: 3.0 (P2)
 
 Author: Architecture Design Document
 
@@ -18,7 +18,7 @@ Author: Architecture Design Document
 
 ---
 
-# System Architecture
+# System Architecture (P2: Multi-Backend)
 
 ```
                          +------------------+
@@ -28,6 +28,23 @@ Author: Architecture Design Document
                                    v
 +---------------------------------------------------------+
 |                    Analysis Pipeline                    |
++---------------------------------------------------------+
+                                   |
+                    +--------------+--------------+
+                    |              |              |
+                    v              v              v
+             +-----------+ +-----------+ +-----------+
+             |  Unicorn  | | Debugger  | |  Hybrid   |
+             |  Backend  | |  Backend  | |  Backend  |
+             +-----------+ +-----------+ +-----------+
+                    |              |              |
+                    +--------------+--------------+
+                                   |
+                                   v
++---------------------------------------------------------+
+|               IExecutionBackend (ABC)                    |
+|  initialize → load_target → install_hooks → execute    |
+|  → dump_memory → get_oep → cleanup                     |
 +---------------------------------------------------------+
                                    |
                                    v
@@ -74,7 +91,12 @@ project/
 ├── core/
 │   ├── context.py        # UnpackContext 中心状态容器
 │   ├── events.py         # 6种事件类型定义
-│   └── plugin.py         # EventBus + Detector/Rebuilder 接口
+│   ├── plugin.py         # EventBus + Detector/Rebuilder 接口
+│   └── backend.py        # IExecutionBackend 抽象接口 (P2)
+├── engine/               # 执行引擎层 (P2)
+│   ├── unicorn_backend.py   # Unicorn CPU模拟
+│   ├── debugger_backend.py  # Win32 Debug API真实进程
+│   └── hybrid_backend.py    # Unicorn→进程注入→Debugger
 ├── loader/
 │   └── loader.py         # PE/DLL 加载器
 ├── emulator/
@@ -93,11 +115,13 @@ project/
 │   ├── iat_rebuilder.py  # IAT 重建 (运行时+原始PE合并)
 │   └── tls_rebuilder.py  # TLS 目录恢复
 ├── exception_engine.py   # SEH/VEH 异常拦截
-├── pipeline.py           # 5阶段集成流水线
+├── pipeline.py           # 5阶段集成流水线 (多后端调度)
 ├── api_recorder.py       # 运行时API调用记录
 ├── crc_bypass.py         # CRC校验绕过(安全/激进模式)
+├── agent_interface.py    # AI Agent JSON接口 + RETRY_STRATEGIES
+├── diagnostic.py         # 失败原因诊断引擎
 ├── peb.py + kuserSharedData.py + teb.py  # 环境模拟
-└── unpacking.py          # Unicorn 模拟解包
+└── unpacking.py          # Unicorn 模拟解包 (向后兼容)
 ```
 
 ---
@@ -140,6 +164,45 @@ class DetectorPlugin(ABC):
 class RebuilderPlugin(ABC):
     rebuild(ctx) -> bool
 ```
+
+---
+
+# Backend Interface (P2)
+
+```python
+class IExecutionBackend(ABC):
+    backend_type: BackendType
+    display_name: str
+    capabilities: Dict
+
+    initialize(ctx) -> bool
+    load_target(ctx) -> bool
+    install_hooks(ctx) -> bool
+    execute(ctx) -> ExecutionResult
+    dump_memory(ctx) -> Optional[bytes]
+    get_oep(ctx) -> int
+    cleanup(ctx) -> None
+```
+
+Three backends:
+- **UnicornBackend**: CPU emulation, fast (~9s), no hardware anti-debug
+- **DebuggerBackend**: Win32 Debug API, real CPU, ScyllaHide, ~30-60s
+- **HybridBackend**: Unicorn decrypt → CreateProcess(SUSPENDED) → WriteProcessMemory → Debugger takeover
+
+---
+
+# Auto-Retry Engine (P1)
+
+```
+agent_unpack() failure
+    → map error_code to RETRY_STRATEGIES
+    → iterate strategies (adjust mode/crc/backend/force_runtime_iat)
+    → on success: return result with "auto-retry succeeded" diagnosis
+    → on exhaustion: return last error with "auto-retry exhausted" diagnosis
+```
+
+7 strategies: oep_not_found, iat_no_imports, emulation_crash, crc_crash,
+               low_import_count, debugger_failed, debugger_access_denied
 
 ---
 
