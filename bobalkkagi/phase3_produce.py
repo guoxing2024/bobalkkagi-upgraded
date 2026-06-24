@@ -67,13 +67,24 @@ def expand_iat_bruteforce(exe_path: str, output_path: str = None):
     return out
 
 
-def produce_final_exe(input_exe: str, oep_rva: int = 0x4ed393,
+def produce_final_exe(input_exe: str, oep_rva: int = None,
                       output: str = None):
     """Phase 3 一体化: OEP fix + IAT + reloc → final EXE"""
     if output is None:
         output = input_exe.replace('_unpacked', '_phase3')
 
-    # Step 1: Fix OEP
+    # Step 1: Auto-detect OEP if not specified
+    if oep_rva is None:
+        from .oep_detector import detect_oep
+        detected = detect_oep(input_exe)
+        if detected:
+            oep_rva = detected - 0x140000000  # RVA
+            print(f"  [Phase3] Auto-detected OEP: 0x{detected:x} (RVA=0x{oep_rva:x})")
+        else:
+            oep_rva = 0x1000  # fallback to first code section entry
+            print(f"  [Phase3] Using fallback OEP: 0x{oep_rva:x}")
+
+    # Step 2: Fix OEP
     tmp = fix_oep(input_exe, oep_rva)
 
     # Step 2: Force reloc (already done during unpack, verify)
