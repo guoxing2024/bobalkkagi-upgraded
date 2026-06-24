@@ -232,6 +232,13 @@ class UnicornBackend(IExecutionBackend):
             interceptor = SyscallInterceptor(self_uc, verbose=self._verbose)
             self_uc.hook_add(UC_HOOK_INSN, interceptor._on_syscall,
                            None, 1, 0, UC_X86_INS_SYSCALL)
+
+            # V6 Task 3: Install user-mode anti-debug stubs
+            from .user_mode_stubber import install_user_mode_stubs
+            stubber = install_user_mode_stubs(self_uc, verbose=self._verbose)
+            if self._verbose:
+                print(f"  [UnicornBackend] User-mode stubs installed")
+
             return orig_emu_start(self_uc, *args, **kwargs)
 
         uc_mod.Uc.emu_start = patched_emu_start
