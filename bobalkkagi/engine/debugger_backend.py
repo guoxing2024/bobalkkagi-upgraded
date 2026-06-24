@@ -35,6 +35,18 @@ from ..core.backend import (
 # ============================================================
 
 kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
+
+# ntdll for NtQueryInformationProcess (PEB access)
+ntdll = ctypes.WinDLL('ntdll', use_last_error=True) if hasattr(ctypes, 'WinDLL') else None
+if ntdll:
+    ntdll.NtQueryInformationProcess = getattr(ntdll, 'NtQueryInformationProcess', None)
+    if hasattr(ntdll, 'NtQueryInformationProcess'):
+        ntdll.NtQueryInformationProcess.argtypes = [
+            wintypes.HANDLE, wintypes.DWORD,
+            ctypes.c_void_p, wintypes.ULONG,
+            ctypes.POINTER(wintypes.ULONG)
+        ]
+        ntdll.NtQueryInformationProcess.restype = wintypes.LONG
 advapi32 = ctypes.WinDLL('advapi32', use_last_error=True)
 
 # Constants
@@ -222,6 +234,18 @@ class RIP_INFO(ctypes.Structure):
     ]
 
 
+class PROCESS_BASIC_INFORMATION(ctypes.Structure):
+    """NtQueryInformationProcess(ProcessBasicInformation=0)"""
+    _fields_ = [
+        ("ExitStatus", wintypes.LONG),
+        ("PebBaseAddress", ctypes.c_void_p),
+        ("AffinityMask", ctypes.c_ulonglong),
+        ("BasePriority", wintypes.LONG),
+        ("UniqueProcessId", ctypes.c_ulonglong),
+        ("InheritedFromUniqueProcessId", ctypes.c_ulonglong),
+    ]
+
+
 class DEBUG_EVENT_U(ctypes.Union):
     _fields_ = [
         ("Exception", EXCEPTION_DEBUG_INFO),
@@ -353,13 +377,73 @@ class ScyllaHideSimulator:
 
     @staticmethod
     def hide_debugger(process_handle, thread_handle) -> bool:
+        """P4: 真正清除 PEB 反调试标志 + Debug寄存器
+
+        1. NtQueryInformationProcess → PEB
+        2. WriteProcessMemory: BeingDebugged=0, NtGlobalFlag&=~0x70
+        3. SetThreadContext: Dr0-Dr3=0, Dr6=0, Dr7=0
         """
-        通过 WriteProcessMemory 清除反调试标记。
-        返回值: True 表示成功应用至少一项隐藏
-        """
-        # 注意: 完整实现需要先获取 PEB 地址
-        # 这里提供框架，实际 hook 在运行时由内部机制处理
-        return True  # 框架就绪，标记为"尝试隐藏"
+        applied = False
+
+        # 1. 获取 PEB 地址
+        peb_addr = 0
+        if ntdll and hasattr(ntdll, 'NtQueryInformationProcess'):
+            try:
+                pbi = PROCESS_BASIC_INFORMATION()
+                pbi_size = ctypes.c_ulong(ctypes.sizeof(pbi))
+                status = ntdll.NtQueryInformationProcess(
+                    process_handle, 0, ctypes.byref(pbi), pbi_size, None)
+                if status == 0:
+                    peb_addr = pbi.PebBaseAddress or 0
+                    if isinstance(peb_addr, ctypes.c_void_p):
+                        peb_addr = peb_addr.value or 0
+                    if peb_addr:
+                        print(f"  [ScyllaHide] PEB @ 0x{peb_addr:x}")
+            except Exception as e:
+                print(f"  [ScyllaHide] NtQueryInformationProcess failed: {e}")
+
+        if not peb_addr:
+            print(f"  [ScyllaHide] ⚠ Cannot find PEB address")
+            return False
+
+        # 2. 清除 PEB 标志
+        try:
+            rpm = kernel32.ReadProcessMemory
+            wpm = kernel32.WriteProcessMemory
+            buf = (ctypes.c_char * 0x200)()
+            bytes_read = ctypes.c_size_t(0)
+            if rpm(process_handle, ctypes.c_void_p(peb_addr), buf, 0x200, ctypes.byref(bytes_read)):
+                peb_data = bytes(buf[:bytes_read.value])
+                if len(peb_data) >= 0x100:
+                    # BeingDebugged @ offset 2 → 0
+                    zero = ctypes.c_byte(0)
+                    wpm(process_handle, ctypes.c_void_p(peb_addr + 2),
+                        ctypes.byref(zero), 1, None)
+                    # NtGlobalFlag @ offset 0xBC → &= ~0x70
+                    ntg = peb_data[0xBC] & ~0x70
+                    b2 = ctypes.c_byte(ntg)
+                    wpm(process_handle, ctypes.c_void_p(peb_addr + 0xBC),
+                        ctypes.byref(b2), 1, None)
+                    applied = True
+                    print(f"  [ScyllaHide] PEB cleared: BeingDebugged=0, NtGlobalFlag=0x{ntg:02x}")
+        except:
+            pass
+
+        # 3. 清除 Debug 寄存器 (Dr0-Dr3, Dr6, Dr7)
+        try:
+            ctx = CONTEXT()
+            ctx.ContextFlags = CONTEXT_FULL
+            if kernel32.GetThreadContext(thread_handle, ctypes.byref(ctx)):
+                ctx.Dr0 = ctx.Dr1 = ctx.Dr2 = ctx.Dr3 = 0
+                ctx.Dr6 = 0
+                ctx.Dr7 = 0
+                kernel32.SetThreadContext(thread_handle, ctypes.byref(ctx))
+                print(f"  [ScyllaHide] Debug registers cleared")
+                applied = True
+        except:
+            pass
+
+        return applied
 
 
 # ============================================================
@@ -501,6 +585,11 @@ class DebuggerBackend(IExecutionBackend):
             self._running = True
 
             print(f"  [DebuggerBackend] Process created: PID={self._process_id}")
+
+            # P4: Immediately apply anti-anti-debug BEFORE any code runs
+            if self._hide_debugger:
+                ScyllaHideSimulator.hide_debugger(self._process_handle, self._thread_handle)
+
             return True
 
         except Exception as e:
@@ -552,8 +641,11 @@ class DebuggerBackend(IExecutionBackend):
             kernel32.ContinueDebugEvent(debug_event.dwProcessId, debug_event.dwThreadId, DBG_CONTINUE)
 
         # Magicmida: 设置内存陷阱 — .text 段设为 PAGE_NOACCESS
-        self._setup_memory_trap()
-        print(f"  [DebuggerBackend] Magicmida trap active: .text @ 0x{self._text_base:x} ({self._text_size} bytes) → PAGE_NOACCESS")
+        if getattr(self, '_enable_memory_trap', True):
+            self._setup_memory_trap()
+            print(f"  [DebuggerBackend] Magicmida trap active: .text @ 0x{self._text_base:x} ({self._text_size} bytes) → PAGE_NOACCESS")
+        else:
+            print(f"  [DebuggerBackend] Memory trap disabled for testing")
         return True
 
     def execute(self, ctx) -> ExecutionResult:
