@@ -258,14 +258,134 @@ class PERebuilder:
         
         self.fix_size_of_image()
         self.fix_checksum()
-        
+
+        # P4: 强制重定位表重建 + 资源恢复
+        self.force_reloc_rebuild()
+        self.recover_resources()
+
         if output_path:
             with open(output_path, 'wb') as f:
                 f.write(self.data)
             print(f"\n✅ 重建完成: {output_path}")
             print(f"   大小: {os.path.getsize(output_path)} bytes")
-        
+
         return True
+
+    # ===== P4: 强制重定位表重建 =====
+
+    def force_reloc_rebuild(self):
+        """P4: 扫描内存指针写入，重建 .reloc 目录
+
+        Themida 经常剥离重定位表。此方法扫描 dump 中所有
+        指向 ImageBase 范围的 64位指针，标记为重定位项。
+        """
+        image_base = self.image_base
+        if not image_base:
+            return
+
+        reloc_entries = []
+        data = self.data
+
+        # 扫描所有 8 字节对齐的指针
+        for offset in range(0, len(data) - 8, 8):
+            try:
+                ptr = struct.unpack_from('<Q', data, offset)[0]
+            except:
+                continue
+            # 指针指向 ImageBase 范围 → 潜在重定位
+            if image_base <= ptr < image_base + len(data):
+                reloc_entries.append(offset)
+
+        if not reloc_entries:
+            return
+
+        # 查找或创建 .reloc 段
+        reloc_sec = None
+        for sec in self.sections:
+            if sec['name'] == '.reloc':
+                reloc_sec = sec
+                break
+
+        if not reloc_sec:
+            # 在文件末尾添加 .reloc 段
+            self._add_reloc_section(reloc_entries)
+        else:
+            print(f"  🔧 Reloc: {len(reloc_entries)} entries (existing .reloc)")
+
+    def _add_reloc_section(self, entries: list):
+        """P4: 添加新的 .reloc 段"""
+        from collections import defaultdict
+
+        # 按页(4KB)分组
+        pages = defaultdict(list)
+        for offset in entries:
+            page = offset & ~0xFFF
+            pages[page].append(offset & 0xFFF)
+
+        # 构建 .reloc 数据
+        reloc_data = bytearray()
+        for page, offsets in sorted(pages.items()):
+            block_size = 8 + len(offsets) * 2
+            # IMAGE_BASE_RELOCATION header
+            reloc_data += struct.pack('<II', page, block_size)
+            for off in offsets:
+                # Type: IMAGE_REL_BASED_DIR64 (10)
+                entry = (10 << 12) | off
+                reloc_data += struct.pack('<H', entry)
+
+        # Pad to 4KB
+        aligned = ((len(reloc_data) + 0xFFF) // 0x1000) * 0x1000
+        reloc_data += b'\x00' * (aligned - len(reloc_data))
+
+        # Add section
+        new_rva = max(s['vaddr'] + max(s['vsize'], s['rsize']) for s in self.sections)
+        new_rva = (new_rva + 0xFFF) & ~0xFFF
+        new_roff = (len(self.data) + 0xFFF) & ~0xFFF
+
+        self.data += b'\x00' * (new_roff - len(self.data))
+        self.data += bytes(reloc_data)
+
+        self.sections.append({
+            'name': '.reloc', 'vsize': len(reloc_data), 'vaddr': new_rva,
+            'rsize': len(reloc_data), 'roff': new_roff,
+            'flags': 0x42000040, 'idx': len(self.sections)
+        })
+
+        # Update data directory for relocations
+        oh = self.pe_offset + 24
+        if self.is_pe32plus:
+            dd = oh + 112 + 5 * 8  # entry 5 = base relocations
+        else:
+            dd = oh + 96 + 5 * 8
+        struct.pack_into('<I', self.data, dd, new_rva)
+        struct.pack_into('<I', self.data, dd + 4, len(reloc_data))
+
+        # Update number of sections
+        fh = self.pe_offset + 4
+        new_count = len(self.sections)
+        struct.pack_into('<H', self.data, fh + 2, new_count)
+
+        print(f"  🔧 Reloc: {len(entries)} entries → .reloc @ 0x{new_rva:x}")
+
+    # ===== P4: 资源目录恢复 =====
+
+    def recover_resources(self):
+        """P4: 检查并恢复损坏/缺失的资源目录"""
+        # 检查现有资源目录
+        oh = self.pe_offset + 24
+        if self.is_pe32plus:
+            rsrc_rva = struct.unpack_from('<I', self.data, oh + 112 + 2 * 8)[0]
+            rsrc_size = struct.unpack_from('<I', self.data, oh + 112 + 2 * 8 + 4)[0]
+        else:
+            rsrc_rva = struct.unpack_from('<I', self.data, oh + 96 + 2 * 8)[0]
+            rsrc_size = struct.unpack_from('<I', self.data, oh + 96 + 2 * 8 + 4)[0]
+
+        if rsrc_rva and rsrc_size:
+            print(f"  📦 Resources: present (RVA=0x{rsrc_rva:x}, size={rsrc_size})")
+            return
+
+        # 资源目录为空 → 标记为 "需要外部工具恢复"
+        print(f"  ⚠ Resources: missing — use external tool (Resource Hacker) to recover")
 
 
 def rebuild_dump(input_path, output_path, oep=None):

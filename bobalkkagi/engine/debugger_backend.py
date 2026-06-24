@@ -407,10 +407,14 @@ class DebuggerBackend(IExecutionBackend):
         self._text_base = 0
         self._text_size = 0
         self._text_original_protect = PAGE_EXECUTE_READ
-        self._tls_entries: List[int] = []  # detected TLS callback addresses
+        self._tls_entries: List[int] = []
         self._trap_active = False
         # P3: instruction-scan IAT cache
-        self._scanned_iat: Dict[int, str] = {}  # addr → "dll!func"
+        self._scanned_iat: Dict[int, str] = {}
+        # P4: Hardware breakpoint VM tracking
+        self._hw_bp_set: List[int] = []  # addresses with HW BP set
+        self._hw_bp_hits: Dict[int, int] = {}  # addr → hit count
+        self._vm_handlers_dynamic: List[dict] = []
 
     # ===== 元信息 =====
 
@@ -775,7 +779,63 @@ class DebuggerBackend(IExecutionBackend):
             return ctx
         return None
 
-    # ===== P3: Magicmida 内存陷阱 =====
+    # ===== P4: Hardware断点 VM Handler 动态追踪 =====
+
+    def _setup_hw_breakpoint(self, thread_handle, addr: int, slot: int = 0):
+        """P4: 在指定地址设置硬件执行断点 (Dr0-Dr3)"""
+        if slot > 3:
+            return False
+        ctx = self._get_thread_context_for(thread_handle)
+        if not ctx:
+            return False
+        # Set debug register
+        dr_regs = [ctx.Dr0, ctx.Dr1, ctx.Dr2, ctx.Dr3]
+        dr_regs[slot] = addr
+        ctx.Dr0, ctx.Dr1, ctx.Dr2, ctx.Dr3 = dr_regs
+        # Enable breakpoint: Dr7 bits 0/2/4/6 = 1 (local enable), bits 16-17/20-21/24-25/28-29 = 00 (execute)
+        ctx.Dr7 |= (1 << (slot * 2))  # Enable bit
+        ctx.Dr7 &= ~(0b11 << (16 + slot * 4))  # Execute mode
+        kernel32.SetThreadContext(thread_handle, ctypes.byref(ctx))
+        self._hw_bp_set.append(addr)
+        print(f"  [DebuggerBackend] 🔴 HW BP set @ 0x{addr:x} (slot {slot})")
+
+    def _clear_hw_breakpoints(self, thread_handle):
+        """P4: 清除所有硬件断点"""
+        ctx = self._get_thread_context_for(thread_handle)
+        if not ctx:
+            return
+        ctx.Dr0 = ctx.Dr1 = ctx.Dr2 = ctx.Dr3 = 0
+        ctx.Dr7 = 0
+        kernel32.SetThreadContext(thread_handle, ctypes.byref(ctx))
+        self._hw_bp_set.clear()
+
+    def _track_vm_with_hw_bp(self, thread_handle, debug_event) -> bool:
+        """P4: 在高熵区域设置 HW BP 追踪 VM 执行
+
+        当执行流进入 .themida 段时，设置硬件断点监视。
+        返回 True 表示捕获到潜在 VM handler。
+        """
+        exc = debug_event.u.Exception
+        exc_code = exc.ExceptionRecord.ExceptionCode
+        exc_addr = exc.ExceptionRecord.ExceptionAddress or 0
+
+        # SINGLE_STEP 事件 → HW BP 命中了
+        if exc_code == EXCEPTION_SINGLE_STEP:
+            # 检查是否是我们设置的 HW BP
+            ctx = self._get_thread_context_for(thread_handle)
+            if ctx:
+                hit_addr = ctx.Rip - 1  # single-step fires AFTER the instruction
+                self._hw_bp_hits[hit_addr] = self._hw_bp_hits.get(hit_addr, 0) + 1
+                hits = self._hw_bp_hits[hit_addr]
+                if hits >= 5:  # 高频命中 → VM handler
+                    if hit_addr not in [h['addr'] for h in self._vm_handlers_dynamic]:
+                        self._vm_handlers_dynamic.append({
+                            'addr': hit_addr, 'hits': hits, 'type': 'hw_bp'
+                        })
+                        print(f"  [DebuggerBackend] 🎯 Dynamic VM handler: 0x{hit_addr:x} ({hits} hits)")
+            return True
+
+        return False
 
     def _parse_text_section(self):
         """解析 PE 头的 .text 段信息"""
@@ -831,12 +891,12 @@ class DebuggerBackend(IExecutionBackend):
         return self._text_base <= addr < self._text_base + self._text_size
 
     def _is_tls_callback(self, thread_handle) -> bool:
-        """Magicmida: 区分 TLS 回调和真正的 OEP
+        """P4: 增强栈回溯 — 区分 TLS/OEP
 
-        判定逻辑:
-          1. 读取线程栈 (RSP 附近)
-          2. 检查返回地址: 如果返回地址指向非主模块段 (Themida壳段) → 可能是TLS
-          3. 检查栈参数: TLS 回调有固定签名 (PVOID DllHandle, DWORD Reason, PVOID Reserved)
+        判定:
+          栈返回地址 → ntdll/kernel32 → TLS (系统层调用)
+          栈返回地址 → 主模块.text段 → OEP (程序真正入口)
+          栈返回地址 → 壳段(.boot/.themida) → TLS (壳内部回调)
         """
         ctx = self._get_thread_context_for(thread_handle)
         if not ctx:
@@ -844,27 +904,69 @@ class DebuggerBackend(IExecutionBackend):
         rsp = ctx.Rsp
 
         try:
-            # 读取 RSP 开始的 32 字节栈数据
-            stack_data = self.read_memory(rsp, 32)
-            if len(stack_data) < 16:
+            stack = self.read_memory(rsp, 64)
+            if len(stack) < 16:
                 return False
 
-            # 返回地址在 RSP[0]
-            ret_addr = struct.unpack_from('<Q', stack_data, 0)[0]
+            ret_addr = struct.unpack_from('<Q', stack, 0)[0]
 
-            # 如果返回地址在主模块 .text 段内且不是 .themida/.boot 段 → 这不是 TLS
-            # （真正的 OEP 返回地址指向正常代码）
+            # 系统 DLL 判定
+            sys_dlls = ['ntdll.dll', 'kernel32.dll', 'kernelbase.dll']
+            for dll_name in sys_dlls:
+                dll_base = self._loaded_modules.get(dll_name)
+                if dll_base and dll_base <= ret_addr < dll_base + 0x200000:
+                    return True  # 返回地址在系统层 → TLS
+
+            # 主模块 .text 段判定 → 这是真正的 OEP
+            if self._text_base <= ret_addr < self._text_base + self._text_size:
+                return False  # 不是 TLS
+
+            # 壳段判定 (.boot / .themida)
             if self._image_base <= ret_addr < self._image_end:
-                # 检查是否在 .themida 或 .boot 段
-                for dll_name, dll_base in self._loaded_modules.items():
-                    if 'ntdll' in dll_name or 'kernel32' in dll_name or 'kernelbase' in dll_name:
-                        if dll_base <= ret_addr < dll_base + 0x200000:
-                            return False
-                return False
+                return True  # 返回地址在壳段 → TLS
 
-            return True  # 返回地址异常 → TLS
         except:
-            return False
+            pass
+        return False
+
+    def _analyze_stack_walkback(self, thread_handle) -> dict:
+        """P4: 完整栈回溯分析 — 返回调用链信息"""
+        ctx = self._get_thread_context_for(thread_handle)
+        if not ctx:
+            return {'tls': False, 'chain': []}
+
+        rsp = ctx.Rsp
+        chain = []
+        try:
+            stack = self.read_memory(rsp, 128)
+            for i in range(0, min(len(stack), 64), 8):
+                addr = struct.unpack_from('<Q', stack, i)[0]
+                if addr == 0:
+                    break
+                # 分类
+                location = 'unknown'
+                if self._image_base <= addr < self._image_end:
+                    if self._text_base <= addr < self._text_base + self._text_size:
+                        location = 'main.text'
+                    else:
+                        location = 'main.shell'
+                else:
+                    for dn, db in self._loaded_modules.items():
+                        if db <= addr < db + 0x200000:
+                            location = f'dll.{dn}'
+                            break
+                chain.append({'addr': addr, 'loc': location})
+                if len(chain) >= 8:
+                    break
+        except:
+            pass
+
+        tls = False
+        if chain:
+            first = chain[0]
+            tls = first['loc'].startswith('dll.') or first['loc'] == 'main.shell'
+
+        return {'tls': tls, 'chain': chain}
 
     def _restore_page(self, addr: int):
         """临时恢复单页保护为可执行"""
@@ -1055,31 +1157,64 @@ class DebuggerBackend(IExecutionBackend):
     # ===== P3: 反反调试 =====
 
     def _handle_anti_debug_syscall(self, exc_addr: int, thread_handle) -> bool:
-        """Magicmida: 拦截 NtSetInformationThread(ThreadHideFromDebugger)
+        """P4: 拦截 NtSetInformationThread + NtQueryInformationProcess
 
-        检查异常地址是否在 ntdll 的关键函数中。
-        如果是 → 读取参数, 若为 ThreadHideFromDebugger(0x11) → 跳过调用。
-        Returns: True if intercepted and handled
+        ThreadHideFromDebugger(0x11) → RIP+=2, RAX=0
+        ProcessDebugPort(0x07) / ProcessDebugFlags(0x1F) → RAX=0
+
+        Returns: True if intercepted
         """
         ntdll_base = self._loaded_modules.get('ntdll.dll')
         if not ntdll_base:
             return False
 
-        # NtSetInformationThread 的偏移 (常见 Windows 版本)
-        nt_set_info_offsets = [0x9A300, 0x9A400, 0x9A500, 0xA2000]  # approximate RVA
-        for off in nt_set_info_offsets:
+        ctx = self._get_thread_context_for(thread_handle)
+        if not ctx:
+            return False
+
+        # NtSetInformationThread(ThreadHideFromDebugger=0x11)
+        nt_set_offsets = [0x9A300, 0x9A400, 0x9A500, 0xA2000]
+        for off in nt_set_offsets:
             if exc_addr == ntdll_base + off:
-                ctx = self._get_thread_context_for(thread_handle)
-                if not ctx:
-                    return False
-                # NtSetInformationThread 第二个参数: ThreadInformationClass → rdx
                 info_class = ctx.Rdx & 0xFFFFFFFF
                 if info_class == 0x11:  # ThreadHideFromDebugger
-                    # 跳过调用: 增加 RIP 越过 syscall 指令
-                    ctx.Rip += 2  # syscall = 2 bytes
-                    ctx.Rax = 0   # STATUS_SUCCESS
+                    ctx.Rip += 2
+                    ctx.Rax = 0  # STATUS_SUCCESS
                     kernel32.SetThreadContext(thread_handle, ctypes.byref(ctx))
                     print(f"  [DebuggerBackend] 🛡 Blocked NtSetInformationThread(ThreadHideFromDebugger)")
+                    return True
+
+        # NtQueryInformationProcess — 检测调试器
+        nt_query_offsets = [0x9A800, 0x9A900, 0x103000, 0x1A300]
+        for off in nt_query_offsets:
+            if exc_addr == ntdll_base + off:
+                info_class = ctx.Rdx & 0xFFFFFFFF
+                if info_class in (0x07, 0x1F):  # ProcessDebugPort, ProcessDebugFlags
+                    ctx.Rip += 2
+                    ctx.Rax = 0  # STATUS_SUCCESS
+                    # 写出零值到输出缓冲区 (debug port = 0, debug flags = 1)
+                    out_buf = ctx.R8  # 第三个参数: ProcessInformation
+                    if out_buf:
+                        zero = (ctypes.c_byte * 8)(*([0]*8))
+                        kernel32.WriteProcessMemory(
+                            self._process_handle, ctypes.c_void_p(out_buf),
+                            zero, 8, None
+                        )
+                    kernel32.SetThreadContext(thread_handle, ctypes.byref(ctx))
+                    name = 'DebugPort' if info_class == 0x07 else 'DebugFlags'
+                    print(f"  [DebuggerBackend] 🛡 Blocked NtQueryInformationProcess({name})")
+                    return True
+
+        # NtQuerySystemInformation(SystemKernelDebuggerInfo=0x23)
+        nt_qsi_offsets = [0x9C000, 0x9C100, 0x1A400]
+        for off in nt_qsi_offsets:
+            if exc_addr == ntdll_base + off:
+                info_class = ctx.Rdx & 0xFFFFFFFF
+                if info_class == 0x23:
+                    ctx.Rip += 2
+                    ctx.Rax = 0xC0000003  # STATUS_INFO_LENGTH_MISMATCH
+                    kernel32.SetThreadContext(thread_handle, ctypes.byref(ctx))
+                    print(f"  [DebuggerBackend] 🛡 Blocked NtQuerySystemInformation(KernelDebugger)")
                     return True
 
         return False
