@@ -72,6 +72,23 @@ THEMIDA_VM_SIGNATURES = [
         bytecode_ptr_offset=0x48,
         vsp_offset=0x50,
     ),
+    # Runtime-extracted (captured during Unicorn execution, not from file scan)
+    VMEntrySignature(
+        engine=VM_ENGINE_THEMIDA,
+        name="themida_runtime_push_mov_jmp",
+        prologue_mnemonics=['push', 'mov', 'sub', 'mov', 'mov', 'jmp'],
+        handler_table_offset=0x24,
+        bytecode_ptr_offset=0x48,
+        vsp_offset=0x50,
+    ),
+    VMEntrySignature(
+        engine=VM_ENGINE_THEMIDA,
+        name="themida_runtime_push_push_lea",
+        prologue_mnemonics=['push', 'push', 'lea', 'mov', 'mov', 'jmp'],
+        handler_table_offset=0x20,
+        bytecode_ptr_offset=0x50,
+        vsp_offset=0x58,
+    ),
 ]
 
 # VMProtect 3.x VM 入口特征
@@ -206,7 +223,50 @@ class VMAnalyzer:
 
         return results
 
-    # ===== Handler Extraction =====
+    # ===== Runtime VM Entry Capture =====
+
+    def detect_vm_entry_runtime(self, address: int, memory: bytes,
+                                 image_base: int = 0x140000000) -> List[int]:
+        """
+        运行时 VM 入口捕获 — 当执行流进入 .themida 段时调用。
+
+        与文件扫描不同，这个方法在 Unicorn 模拟执行过程中被调用，
+        捕获的是实际运行时的 VM 入口代码（已被 Themida bootstrap 构造好）。
+
+        Args:
+            address: 当前执行的地址 (VA)
+            memory: 完整内存镜像
+            image_base: 映像基址
+
+        Returns:
+            新发现的 VM 入口列表
+        """
+        if not self._capstone or not memory:
+            return []
+
+        # 只在第一次调用时进行扫描
+        if self._entries:
+            return []
+
+        entries = []
+
+        # 从当前地址解码 32 条指令
+        offset = address - image_base
+        if offset < 0 or offset + 128 > len(memory):
+            return entries
+
+        chunk = bytes(memory[offset:offset + 128])
+
+        # 检查是否匹配已知签名
+        for sig in THEMIDA_VM_SIGNATURES:
+            results = self._match_signature(chunk, address, sig)
+            entries.extend(results)
+
+        if entries:
+            print(f"  [VMAnalyzer] Runtime VM entry captured at 0x{address:x}")
+            self._entries = entries
+
+        return entries
 
     def record_execution(self, address: int):
         """记录执行地址"""

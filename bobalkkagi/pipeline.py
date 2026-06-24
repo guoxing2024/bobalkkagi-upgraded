@@ -273,6 +273,18 @@ class Pipeline:
         # 分析
         result = vm.analyze(self.ctx.memory_image, self.ctx.image_base)
 
+        # 如果文件扫描没找到，尝试从 .boot 段扫描 (bootstrap代码在这里跳转到VM)
+        if not result["detected"] and self.ctx.memory_image:
+            boot = getattr(self.ctx, 'boot_section', None)
+            if boot and len(boot) >= 3:
+                boot_va = boot[1]
+                entries = vm.detect_vm_entry_runtime(boot_va, self.ctx.memory_image, self.ctx.image_base)
+                if entries:
+                    result["detected"] = True
+                    result["engine"] = "themida"
+                    result["entry_points"] = [f"0x{e:x}" for e in entries]
+                    print(f"  ✅ Runtime VM entry detected via .boot section scan")
+
         if result["detected"]:
             print(f"  ✅ VM detected: {result['engine']}")
             print(f"     entries: {result['entry_points']}")
