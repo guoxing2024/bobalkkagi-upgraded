@@ -32,11 +32,12 @@ class ScyllaInjector:
 
     DLL_NAME = "HookLibraryx64.dll"
     SEARCH_PATHS = [
-        ".",  # 当前目录
-        os.path.join(os.path.dirname(__file__), "..", ".."),  # 项目根
+        r"D:\Tools\ScyllaHide",
+        r"D:\Tools",
+        r"D:\Tools\RE",
+        os.path.join(os.path.dirname(__file__), "..", ".."),
         os.path.join(os.environ.get("USERPROFILE", "~"), "Tools", "ScyllaHide"),
         r"C:\Tools\ScyllaHide",
-        r"C:\Program Files\ScyllaHide",
     ]
 
     def __init__(self):
