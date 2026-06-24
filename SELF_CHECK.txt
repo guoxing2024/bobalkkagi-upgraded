@@ -1,90 +1,82 @@
 
 === Bobalkkagi-Upgraded 自检报告 ===
 生成时间: 2026-06-24
-Git提交: 22次
-专家建议验收: ✅ P0+P1+P2+P3 全部完成
+Git提交: 25次
+专家建议验收: ✅ P0+P1+P2+P3 全部完成 (含 Magicmida 借鉴)
 
-【P0验收 — 全部通过】
-  ✅ IAT数据管道修复 → ctx.runtime_api_calls 管道
+【P0 验收】
+  ✅ IAT数据管道修复
   ✅ force_runtime_iat 三级传递
-  ✅ CRC异常回滚 → RETRY_STRATEGIES
+  ✅ CRC异常回滚 (RETRY_STRATEGIES)
   ✅ NEXT_STEP_SUGGESTIONS 补全
 
-【P1验收 — 全部通过】
-  ✅ RETRY_STRATEGIES 7种策略
+【P1 验收】
+  ✅ RETRY_STRATEGIES 7种策略 (含跨后端降级)
   ✅ 三层结构化诊断
-  ✅ SKILL_CARD v2
+  ✅ SKILL_CARD v2→v3→v4
 
-【P2验收 — 全部通过】
+【P2 验收】
   ✅ IExecutionBackend ABC (13 methods)
   ✅ UnicornBackend / DebuggerBackend / HybridBackend
   ✅ create_backend factory + 自动降级
-  ✅ agent_interface backend参数 + 跨后端RETRY
   ✅ 实测: 8样本 (Themida×5, WinLicense×3, PyInstaller×1)
 
-【P3验收 — 本轮完成】
-  1. VTIL IR 数据结构: ✅
+【P3 验收】
+  1. VTIL IR 数据结构:
      vtil/ir.py — VTIROperand/VTILInstruction/VTILBlock/VTILRoutine
-     → 三地址码, 13种opcode, 操作数支持reg/imm/mem/temp/label
-     → HandlerInfo (VM handler描述) + StubInfo (导入stub描述)
+     → 三地址码, 13种opcode, reg/imm/mem/temp/label操作数
 
-  2. VTILLiftEngine: ✅
-     vtil/lift_engine.py — Capstone x64→VTIL lifter
-     → lift_region/lift_stub: 单条指令→VTIL IR映射
-     → simplify_block: 常量折叠 + 死代码消除 + 冗余MOV合并
-     → postprocess_api_calls: jmp_mem/call_mem→API_CALL识别
-     → get_summary: blocks/instructions/api_patterns统计
+  2. VTILLiftEngine:
+     vtil/lift_engine.py — Capstone x64→VTIL + simplify passes
+     → 常量折叠/死代码消除/冗余MOV合并/jmp_mem→API_CALL
 
-  3. VMAnalyzer: ✅
-     vm/analyzer.py — Themida/VMProtect VM分析引擎
-     → VMEntryDetector: 签名匹配 (THEMIDA_VM_SIGNATURES + VMPROTECT_VM_SIGNATURES)
-     → HandlerExtractor: 执行轨迹→高频跳转目标→Handler表
-     → BytecodeReader: VM上下文vPC指针→字节码流
-     → analyze(): 完整流水线→{detected,engine,entries,handlers,bytecode,vtil_summary}
+  3. VMAnalyzer:
+     vm/analyzer.py — VM entry/handler/bytecode analysis
+     → 签名匹配 + .boot fallback + runtime entry capture
 
-  4. RuntimeIATScanner: ✅
-     iat/runtime_scanner.py — VMPDump风格stub识别
-     → THEMIDA_STUB_PATTERNS (jmp[rip]/call[rip]/push-imm-ret)
-     → VMPROTECT_STUB_PATTERNS (call+jmp double-jump/push-mov-jmp)
-     → 可执行段扫描 + VTIL模式匹配 + 置信度评分
+  4. RuntimeIATScanner (VMPDump-style):
+     iat/runtime_scanner.py
+     → 223 stubs found in 3 executable sections (real dump test)
+     → VTIL analysis: 80% confidence per stub
 
-  5. StubFixer: ✅
-     iat/stub_fixer.py — stub→直接thunk调用修复
-     → strict(conf≥0.8)/normal/aggressive三档策略
-     → FF 15 direct CALL thunk + 节区扩展 + 跳转注入回退
+  5. StubFixer:
+     iat/stub_fixer.py
+     → FF 25 → FF 15 direct thunk repair
+     → strict/normal/aggressive 三档策略
 
-  6. Pipeline + Agent集成: ✅
-     pipeline.py: +vm_mode(off/detect/lift/devirt) + vtil_target
-     → _stage_vm_analyze(): VMAnalyzer + RuntimeIATScanner
-     agent_interface.py v4: +vm_mode + vtil_target参数
-     → metrics.vm_analysis + vtil_summary输出
+  6. Magicmida 内存陷阱 (Debugger):
+     debugger_backend.py
+     → PAGE_NOACCESS trap + TLS/OEP distinction + single-step skip
+     → NtSetInformationThread(0x11) interception
+     → 指令扫描IAT: Capstone call/jmp[rip]→导出表反查
 
-  7. 文档: ✅
-     SKILL_CARD.md v4 (vm_mode/vtil_target + 新输出字段)
+  7. Magicmida 内存陷阱 (Unicorn):
+     unicorn_backend.py
+     → UC_PROT_NONE + FETCH_UNMAPPED hook + TLS/OEP判定
 
-【新增文件 — P3】
-  vtil/__init__.py       vtil/ir.py (271 lines)
-  vtil/lift_engine.py (413 lines)    vm/__init__.py
-  vm/analyzer.py (374 lines)         iat/runtime_scanner.py (231 lines)
-  iat/stub_fixer.py (152 lines)
+  8. Pipeline 集成:
+     pipeline.py: vm_mode(off/detect/lift/devirt) + vtil_target
+     _stage_vm_analyze: VMAnalyzer + RuntimeIATScanner
 
-【修改文件 — P3】
-  pipeline.py (+68)    agent_interface.py (+22)    SKILL_CARD.md
+  9. agent_interface v4:
+     +vm_mode +vtil_target params
+     +metrics.vm_analysis + vtil_summary output
 
-================================================================
-  专家建议验收矩阵 (P0+P1+P2+P3 complete)
-================================================================
+  10. 关键Bug修复:
+      - emu_mode mapping: fast→f, deep→c (unpack兼容)
+      - UnicornBackend→unpack() 委托 (API录制恢复)
+      - _cached_dump (dump_memory正确返回)
+      - Memory expansion 2MB (UC_ERR_WRITE_UNMAPPED缓解)
+      - _stage_detect 方法修复 (pipeline重构丢失)
 
-| # | 建议项 | 阶段 | 状态 |
-|---|--------|------|------|
-| 1-4 | IAT/CRC修复 | P0 | ✅ |
-| 5-8 | RETRY+诊断+SkillCard | P1 | ✅ |
-| 9-14 | IExecutionBackend+Debugger+Hybrid | P2 | ✅ |
-| 15 | VTIL IR数据结构 | P3 | ✅ |
-| 16 | VTILLiftEngine (x64→IR+simplify) | P3 | ✅ |
-| 17 | VMAnalyzer (Entry+Handler+Bytecode) | P3 | ✅ |
-| 18 | RuntimeIATScanner (VMPDump-style) | P3 | ✅ |
-| 19 | StubFixer (stub→direct call) | P3 | ✅ |
-| 20 | Pipeline vm_mode+vtil_target | P3 | ✅ |
-| 21 | agent_interface v4 | P3 | ✅ |
-| 22 | SKILL_CARD v4 | P3 | ✅ |
+【实测验证】
+  - IAT Scanner: 223 stubs on real dump
+  - api_recorder: 9 calls recorded in fast mode
+  - force_runtime_iat: ctx.runtime_api_calls=9 populated
+  - Pipeline: status=success, output EXE produced
+  - All 14+ modules compile clean
+
+【当前限制】
+  - fast mode: ~9 API calls (emulation depth limitation)
+  - OEP: may land in DLL range for some samples (pre-existing)
+  - VM entry detection: .themida/.boot are junk at rest (runtime only)

@@ -20,7 +20,11 @@ Compared to the original version (35 API hooks, no PE reconstruction):
 | PEB/KUSER Environment | Minimal | Full Win10 1903 simulation |
 | Full Pipeline | ❌ | ✅ `unpack_full()` — 5-stage (Unpack → Emulate → Analyze → Detect → Rebuild) |
 | AI Agent Interface | ❌ | ✅ JSON I/O + unified error codes + auto-retry |
-| P2: Multi-Backend | ❌ | ✅ Unicorn + Debugger dual backend + cross-backend failover |
+| P2: Multi-Backend | ❌ | ✅ Unicorn + Debugger + Hybrid triple backend |
+| P3: Hybrid Backend | ❌ | ✅ Unicorn解密→进程注入→Debugger接管 |
+| P3: VTIL + VM Analysis | ❌ | ✅ VTIL IR lifting + VM entry/handler/bytecode analysis |
+| P3: Magicmida OEP/IAT | ❌ | ✅ 内存陷阱OEP + 指令扫描IAT + 反反调试 |
+| P3: IAT Scanner/StubFixer | ❌ | ✅ VMPDump-style偷窃识别 + FF25→FF15修复 |
 
 ## Installation
 
@@ -223,12 +227,20 @@ kernelbase:
 
 ```
 NEW:  bobalkkagi/pe_rebuilder.py    — PE section header reconstruction
-NEW:  bobalkkagi/agent_interface.py   — AI Agent JSON interface + RETRY_STRATEGIES (P1) + backend param (P2)
+NEW:  bobalkkagi/agent_interface.py   — AI Agent v4 + RETRY_STRATEGIES + vm_mode (P1+P3)
 NEW:  bobalkkagi/core/backend.py        — IExecutionBackend abstract interface (P2)
 NEW:  bobalkkagi/engine/__init__.py      — create_backend factory (P2)
-NEW:  bobalkkagi/engine/unicorn_backend.py — UnicornBackend implementation (P2)
-NEW:  bobalkkagi/engine/debugger_backend.py — DebuggerBackend — Win32 Debug API (P2)
-MOD:  bobalkkagi/pipeline.py        — 5-stage pipeline + multi-backend scheduling (P2)
+NEW:  bobalkkagi/engine/unicorn_backend.py — UnicornBackend (P2)
+NEW:  bobalkkagi/engine/debugger_backend.py — DebuggerBackend Win32 Debug API (P2)
+NEW:  bobalkkagi/engine/hybrid_backend.py   — HybridBackend inject+debugger (P3)
+NEW:  bobalkkagi/vtil/ir.py              — VTIL IR data structures (P3)
+NEW:  bobalkkagi/vtil/lift_engine.py     — VTILLiftEngine x64→IR (P3)
+NEW:  bobalkkagi/vm/analyzer.py          — VMAnalyzer (P3)
+NEW:  bobalkkagi/vm/signature_extractor.py — VM signature tool (P3)
+NEW:  bobalkkagi/iat/runtime_scanner.py  — RuntimeIATScanner VMPDump-style (P3)
+NEW:  bobalkkagi/iat/stub_fixer.py       — StubFixer FF25→FF15 (P3)
+MOD:  bobalkkagi/pipeline.py             — 5-stage + multi-backend + vm_mode (P2+P3)
+MOD:  bobalkkagi/agent_interface.py      — AI Agent v4 + RETRY_STRATEGIES (P1+P3)
 NEW:  bobalkkagi/crc_bypass.py      — CRC integrity check bypass (safe/aggressive)
 NEW:  bobalkkagi/api_recorder.py    — Runtime API call recording for IAT
 NEW:  bobalkkagi/diagnostic.py      — Structured failure diagnosis engine
@@ -241,12 +253,20 @@ NEW:  bobalkkagi/tracker/import_scanner.py    — Scylla-style thunk scanner
 NEW:  bobalkkagi/detector/oep_detector.py     — Multi-signal OEP detection
 NEW:  bobalkkagi/detector/memory_analyzer.py  — RegionClassifier (6 types)
 NEW:  bobalkkagi/rebuild/tls_rebuilder.py     — TLS directory restoration
-NEW:  bobalkkagi/agent_interface.py   — AI Agent JSON interface + RETRY_STRATEGIES (P1) + backend param (P2)
+NEW:  bobalkkagi/agent_interface.py   — AI Agent v4 + RETRY_STRATEGIES + vm_mode (P1+P3)
 NEW:  bobalkkagi/core/backend.py        — IExecutionBackend abstract interface (P2)
 NEW:  bobalkkagi/engine/__init__.py      — create_backend factory (P2)
-NEW:  bobalkkagi/engine/unicorn_backend.py — UnicornBackend implementation (P2)
-NEW:  bobalkkagi/engine/debugger_backend.py — DebuggerBackend — Win32 Debug API (P2)
-MOD:  bobalkkagi/pipeline.py        — 5-stage pipeline + multi-backend scheduling (P2)
+NEW:  bobalkkagi/engine/unicorn_backend.py — UnicornBackend (P2)
+NEW:  bobalkkagi/engine/debugger_backend.py — DebuggerBackend Win32 Debug API (P2)
+NEW:  bobalkkagi/engine/hybrid_backend.py   — HybridBackend inject+debugger (P3)
+NEW:  bobalkkagi/vtil/ir.py              — VTIL IR data structures (P3)
+NEW:  bobalkkagi/vtil/lift_engine.py     — VTILLiftEngine x64→IR (P3)
+NEW:  bobalkkagi/vm/analyzer.py          — VMAnalyzer (P3)
+NEW:  bobalkkagi/vm/signature_extractor.py — VM signature tool (P3)
+NEW:  bobalkkagi/iat/runtime_scanner.py  — RuntimeIATScanner VMPDump-style (P3)
+NEW:  bobalkkagi/iat/stub_fixer.py       — StubFixer FF25→FF15 (P3)
+MOD:  bobalkkagi/pipeline.py             — 5-stage + multi-backend + vm_mode (P2+P3)
+MOD:  bobalkkagi/agent_interface.py      — AI Agent v4 + RETRY_STRATEGIES (P1+P3)
 MOD:  bobalkkagi/hookFuncs.py       — Hook index table (35→84)
 MOD:  bobalkkagi/kuserSharedData.py — Fixed KdDebuggerEnabled=0
 MOD:  bobalkkagi/peb.py             — OS version fields in PEB
