@@ -753,6 +753,7 @@ class DebuggerBackend(IExecutionBackend):
                     continue_status = DBG_CONTINUE
 
             elif event_code == LOAD_DLL_DEBUG_EVENT:
+                dll_name = self._read_dll_name(debug_event)
                 if dll_name:
                     ld = debug_event.u.LoadDll
                     self._loaded_modules[dll_name.lower()] = ld.lpBaseOfDll or 0
