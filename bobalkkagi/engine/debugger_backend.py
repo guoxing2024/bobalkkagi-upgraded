@@ -586,9 +586,21 @@ class DebuggerBackend(IExecutionBackend):
 
             print(f"  [DebuggerBackend] Process created: PID={self._process_id}")
 
-            # P4: Immediately apply anti-anti-debug BEFORE any code runs
+            # V5: ScyllaHide 进程内注入 (CREATE_SUSPENDED, 进程未运行)
             if self._hide_debugger:
-                ScyllaHideSimulator.hide_debugger(self._process_handle, self._thread_handle)
+                from .scylla_injector import inject_scyllahide
+                if inject_scyllahide(self._process_id):
+                    self._scylla_active = True
+                    print(f"  [DebuggerBackend] 🛡 ScyllaHide active — 12+ protections")
+                else:
+                    # Fallback: our old PEB/ScyllaHide simulator
+                    ScyllaHideSimulator.hide_debugger(
+                        self._process_handle, self._thread_handle)
+
+            elif self._hide_debugger:
+                # Fallback: P4 ScyllaHide simulation
+                ScyllaHideSimulator.hide_debugger(
+                    self._process_handle, self._thread_handle)
 
             return True
 
