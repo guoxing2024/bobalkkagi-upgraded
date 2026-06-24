@@ -101,9 +101,11 @@ def produce_final_exe(input_exe: str, oep_rva: int = None,
     print(f"  [Phase3] reloc={has_reloc} rsrc={has_rsrc} iat={iat}")
     print(f"  [Phase3] OEP=0x{pe.OPTIONAL_HEADER.AddressOfEntryPoint:x}")
 
-    # Step 3: Expand IAT with essential imports
+    # Step 3: Expand IAT + inject into PE
     from .v6_final import expand_iat_with_fallback
     expand_iat_with_fallback(tmp, tmp)
+    from .iat_injector import inject_from_manifest
+    tmp = inject_from_manifest(tmp)
 
     # Step 4: Copy to final output
     import shutil
