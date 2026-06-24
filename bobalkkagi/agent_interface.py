@@ -214,6 +214,9 @@ def agent_unpack(
     snapshot_every_stage: bool = False,
     force_runtime_iat: bool = False,
     backend: str = "unicorn",
+    # P3: VM 分析参数
+    vm_mode: str = "off",
+    vtil_target: str = "auto",
 ) -> str:
     """
     AI Agent 标准工具接口。
@@ -227,9 +230,17 @@ def agent_unpack(
         snapshot_every_stage: Save context state after each stage
         force_runtime_iat: If True, ignore original PE imports and use
             only runtime API recording (solves "low import count" issue)
-        backend: "unicorn" (default) | "debugger"
+        backend: "unicorn" (default) | "debugger" | "hybrid"
             - "unicorn": 纯Unicorn模拟，对抗无硬件反调试的样本
             - "debugger": Win32 Debug API真实进程，对抗硬件/时序反调试
+            - "hybrid": Unicorn解密 + 进程注入 + 真实执行
+        vm_mode: "off" (default) | "detect" | "lift" | "devirt" (P3)
+            - "off": 不进行 VM 分析
+            - "detect": 检测 VM 入口与 Handler，输出 vm_analysis 字段
+            - "lift": 对 VM Handler 做 VTIL 提升与简化
+            - "devirt": 尝试语义恢复 (简化控制流、还原API调用序列)
+        vtil_target: "auto" (default) | "themida" | "vmprotect" (P3)
+            - VM 引擎类型，用于 Handler 识别和 stub 扫描
     
     Returns:
         JSON string with AgentResponse
@@ -254,6 +265,8 @@ def agent_unpack(
                        force_runtime_iat=force_runtime_iat,
                        crc_mode=crc_mode,
                        backend=backend,
+                       vm_mode=vm_mode,
+                       vtil_target=vtil_target,
                        emu_mode=mode)
         
         # Execute
@@ -281,8 +294,11 @@ def agent_unpack(
                 oep=result.oep,
                 metrics=metrics
             )
-            
-            # Warnings
+            # P3: VM 分析结果
+            if result.vm_analysis:
+                resp.metrics["vm_analysis"] = result.vm_analysis
+                if result.vm_analysis.get("vtil_summary"):
+                    resp.metrics["vtil_summary"] = result.vm_analysis["vtil_summary"]
             if pipe.ctx:
                 import_count = sum(len(v) for v in pipe.ctx.imports.values())
                 dll_count = len(pipe.ctx.imports)

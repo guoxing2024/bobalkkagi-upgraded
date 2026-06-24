@@ -28,7 +28,7 @@ from .engine import create_backend
 class PipelineResult:
     """结构化流水线结果"""
     def __init__(self, status="ok", stage="", message="", dump_path=None, output_path=None, oep=None,
-                 backend_used=""):
+                 backend_used="", vm_analysis=None):
         self.status = status
         self.stage = stage
         self.message = message
@@ -36,6 +36,7 @@ class PipelineResult:
         self.output_path = output_path
         self.oep = oep
         self.backend_used = backend_used
+        self.vm_analysis = vm_analysis or {}  # P3: VM分析结果
 
 
 class Pipeline:
@@ -53,7 +54,10 @@ class Pipeline:
 
     def __init__(self, sample_path: str, dll_path: str = "win10_v1903",
                  force_runtime_iat: bool = False, crc_mode: str = "safe",
-                 backend: str = "unicorn", **backend_kwargs):
+                 backend: str = "unicorn",
+                 vm_mode: str = "off",
+                 vtil_target: str = "auto",
+                 **backend_kwargs):
         self.sample_path = sample_path
         self.dll_path = dll_path
         self.ctx = UnpackContext(sample_path)
@@ -61,11 +65,18 @@ class Pipeline:
         self.force_runtime_iat = force_runtime_iat
         self.crc_mode = crc_mode
 
-        # P2: 创建执行后端
+        # P2: 执行后端
         self._backend_type = backend
         self._backend_kwargs = backend_kwargs
         self._backend_kwargs.setdefault('crc_mode', crc_mode)
         self._backend: IExecutionBackend = None
+
+        # P3: VM 分析
+        self._vm_mode = vm_mode           # off / detect / lift / devirt
+        self._vtil_target = vtil_target   # auto / themida / vmprotect
+
+        # P3: VM 分析结果
+        self._vm_analysis_result: dict = {}
 
     def run(self) -> PipelineResult:
         """运行完整流水线"""
@@ -84,6 +95,10 @@ class Pipeline:
             # 阶段3: 分析
             self._stage_analyze()
 
+            # 阶段3b: VM 分析 (P3)
+            if self._vm_mode != "off":
+                self._stage_vm_analyze()
+
             # 阶段4: 检测
             self._stage_detect()
 
@@ -96,6 +111,7 @@ class Pipeline:
                 output_path=self.ctx.output_path,
                 oep=self.ctx.oep,
                 backend_used=self._backend_type,
+                vm_analysis=self._vm_analysis_result,
             )
 
         except Exception as e:
@@ -235,7 +251,51 @@ class Pipeline:
                     self.ctx.imports[dll].append(f)
                 self.ctx.runtime_api_calls.add((dll, f))
 
-    def _stage_detect(self):
+    def _stage_vm_analyze(self):
+        """阶段3b: VM 分析 (P3) — 入口检测 + Handler提取 + stub扫描"""
+        print(f"\n{'='*60}")
+        print(f"  阶段 3b/5: VM 分析 [mode={self._vm_mode}, target={self._vtil_target}]")
+        print(f"{'='*60}")
+
+        result = {"detected": False, "engine": "auto"}
+
+        if not self.ctx.memory_image:
+            print("  ❌ 无内存镜像，跳过 VM 分析")
+            self._vm_analysis_result = result
+            return
+
+        from .vm.analyzer import VMAnalyzer
+        from .vtil.lift_engine import VTILLiftEngine
+
+        lift_engine = VTILLiftEngine()
+        vm = VMAnalyzer(self.ctx, lift_engine)
+
+        # 分析
+        result = vm.analyze(self.ctx.memory_image, self.ctx.image_base)
+
+        if result["detected"]:
+            print(f"  ✅ VM detected: {result['engine']}")
+            print(f"     entries: {result['entry_points']}")
+            print(f"     handlers: {result['handler_count']}")
+            print(f"     bytecode: {result['bytecode_size']} bytes")
+        else:
+            print(f"  ℹ No VM entry detected")
+
+        # lift 模式: 提升且简化 handler
+        if self._vm_mode == "lift" and result["detected"]:
+            print(f"  [LIFT] VTIL summary: {result['vtil_summary']}")
+
+        self._vm_analysis_result = result
+
+        # Stub 扫描 (Phase 3)
+        if self._vm_mode in ("lift", "devirt"):
+            from .iat.runtime_scanner import RuntimeIATScanner
+            scanner = RuntimeIATScanner(lift_engine)
+            stubs = scanner.scan_stubs(self.ctx, target=self._vtil_target)
+            if stubs:
+                print(f"  [IATScanner] {len(stubs)} import stubs identified")
+                result["stub_count"] = len(stubs)
+                self._scanned_stubs = stubs
         """阶段4: OEP 检测 + Memory 分析"""
         print(f"\n{'='*60}")
         print(f"  阶段 4/5: OEP检测 + 区域分析")
