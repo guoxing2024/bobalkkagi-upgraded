@@ -26,6 +26,7 @@ HookFuncs={
     "ntdll.dll_ZwDuplicateToken" : 23,
     "ntdll.dll_ZwAccessCheck" : 24,
     "kernel32.dll_VirtualProtect" : 25,
+    "kernel32.dll_VirtualAlloc" : 99,
     "win32u.dll_NtUserGetForegroundWindow" : 26,
     "user32.dll_GetWindowTextA" : 27,
     "ntdll.dll_ZwQuerySystemInformation" : 28,

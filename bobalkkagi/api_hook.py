@@ -447,7 +447,23 @@ def hook_ZwAccessCheck(uc, log, regs):
     
 
 
-def hook_VirtualProtect(uc, log, regs):
+def hook_VirtualAlloc(uc, log, regs):
+    """V7: 监控 VirtualAlloc — Themida 3.x 在此分配执行页"""
+    set_register(regs)
+    addr = REGS.rcx; size = REGS.rdx; alloc_type = REGS.r8 & 0xFFFFFFFF; protect = REGS.r9 & 0xFFFFFFFF
+    log.warning(f"HOOK_API_CALL : VirtualAlloc, Address : 0x{addr:x}, Size : 0x{size:x}, Type : 0x{alloc_type:x}, Protect : 0x{protect:x}")
+    
+    if addr == 0 and size > 0:
+        # Allocate memory in UC
+        from unicorn import UC_PROT_ALL
+        new_addr = 0x30000000  # dedicated alloc region
+        aligned = (size + 0xFFF) & ~0xFFF
+        uc.mem_map(new_addr, aligned, UC_PROT_ALL)
+        uc.reg_write(UC_X86_REG_RAX, new_addr)
+    else:
+        uc.reg_write(UC_X86_REG_RAX, addr)
+    
+    ret(uc, REGS.rsp)
     
 
     set_register(regs)
