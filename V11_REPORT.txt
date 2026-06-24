@@ -1,0 +1,95 @@
+# bobalkkagi-upgraded V11.0 最终报告
+
+**日期**: 2026-06-25  
+**样本**: 伦伦软件.exe (Themida 3.x, x64)  
+
+---
+
+## 全部里程碑
+
+```
+V6:  ✅ 处于 VM Runtime (16M .boot, 0 .text)
+V7:  ✅ 未进入 Native (0 .text write, 0 VirtualAlloc)
+V8:  ✅ VM 状态静态 (修正: .themida 是数据表)
+V9:  ✅ PEB/TEB 无明显问题
+V10: ✅ 吸收态诊断修正 → VM 在遍历, 非固定循环
+V11: ✅ VIP 遍历完成, .text 仍未解密
+```
+
+---
+
+## V11 核心发现
+
+### VIP (VM Instruction Pointer)
+
+```
+位置: 0x14fee8 (栈)
+范围: 0x140885210 → 0x140885201 (17 步)
+步进: 每步 ~4.6M 指令 (有 CODE hook) / ~0.8s (无 CODE hook)
+耗时: 15s (无 hook)
+```
+
+### VIP 遍历序列
+
+```
+0x210 → 0x20f → 0x20e → 0x20d → 0x20c →
+0x20b → 0x20a → 0x209 → 0x208 → 0x207 →
+0x206 → 0x205 → 0x204 → 0x203 → 0x202 →
+0x201 → 0x535d69 (跳转到新状态)
+```
+
+### 关键发现
+
+1. **VIP 从 .boot 代码区倒序读取字节** (0x210→0x201)
+2. **遍历完成后 VIP 跳转到 0x535d69** — 非 .boot 地址
+3. **.text 仍然加密** — 遍历完成后未触发解密
+4. **VirtualProtect(.text) 从未调用**
+5. **VDP (0x14fed8) 指向 .themida scratch 页** — VM 数据指针
+
+---
+
+## 四个专家问题
+
+| 问题 | 答案 |
+|------|------|
+| 链表总长度？ | 17 步 (0x210 → 0x201) |
+| 结束条件？ | VIP 跳转到 0x535d69 |
+| 0x14fed8 结构？ | VM 数据指针 → .themida 零初始化页 |
+| 遍历后第一件事？ | VM 进入新 VIP 状态, .text 未解密 |
+
+---
+
+## 已冻结模块
+
+OEP / IAT / PE / 资源 / 导入表
+
+---
+
+## 资产清单
+
+```
+bobalkkagi/engine/
+├── memory_analyzer.py      V7 全内存页监控
+├── vm_analyzer.py          V8 VM Runtime 分析
+├── v9_analyzer.py          V9 转移矩阵+环境检查
+├── reality_gap.py          V9 环境缺口分析
+├── dep_tracker.py          V10 Runtime Dependency Graph
+├── diverge_finder.py       V10 Divergence Point Finder
+├── fetch_trap_oep.py       V6 Fetch Trap
+├── alloc_monitor.py        V7 VirtualAlloc 追踪
+├── direct_ep.py            V6 Direct EP 启动器
+
+报告:
+├── V6_REPORT.txt
+├── V7_REPORT.txt
+├── V8_REPORT.txt
+├── V9_REPORT.txt
+├── V10_REPORT.txt
+└── V11_REPORT.txt
+```
+
+---
+
+## 下一步
+
+Reality Gap Analysis — 0x535d69 后的 VM 状态需要进一步追踪
