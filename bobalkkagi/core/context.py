@@ -235,8 +235,102 @@ class UnpackContext:
             result[dll].append(func)
         return result
     
+    def save_state(self, filepath: str) -> bool:
+        """
+        保存上下文快照 (JSON格式，Agent可读取)。
+        
+        保存内容:
+          - OEP状态、OEP候选
+          - 模块列表
+          - 导入表
+          - 统计计数
+          - 事件日志(最近100条)
+        
+        注意: memory_image 太大，不保存到JSON中。
+              需要时从 dump_path 重新读取。
+        """
+        import json as _json
+        from datetime import datetime
+        
+        state = {
+            "version": "2.0",
+            "saved_at": datetime.now().isoformat(),
+            "sample": self.sample_path,
+            "oep_state": self._oep_state,
+            "oep": self.oep,
+            "oep_candidates": self.oep_candidates[:10] if self.oep_candidates else [],
+            "modules": {k: {"name": v.name, "base": v.base, "size": v.size}
+                       for k, v in list(self.modules.items())[:20]},
+            "imports": {k: v[:10] for k, v in list(self.imports.items())[:20]},
+            "dump_path": self.dump_path,
+            "output_path": self.output_path,
+            "metrics": {
+                "api_events": len(self.api_events),
+                "memory_events": len(self.memory_events),
+                "call_events": len(self.call_events),
+                "exception_events": len(self.exception_events),
+                "runtime_apis": len(self.runtime_api_calls),
+            },
+            "recent_events": {
+                "api": [str(e) for e in self.api_events[-50:]],
+                "memory": [str(e) for e in self.memory_events[-50:]],
+                "exception": [str(e) for e in self.exception_events[-50:]],
+            },
+        }
+        
+        try:
+            with open(filepath, 'w', encoding='utf-8') as f:
+                _json.dump(state, f, indent=2, ensure_ascii=False)
+            return True
+        except Exception as e:
+            print(f"Failed to save state: {e}")
+            return False
+    
+    def load_state(self, filepath: str) -> bool:
+        """
+        从快照恢复上下文状态 (Agent断点续传)。
+        
+        恢复内容: OEP状态、模块列表、导入表、统计信息。
+        memory_image 需要从 dump_path 重新加载。
+        """
+        import json as _json
+        
+        try:
+            with open(filepath, 'r', encoding='utf-8') as f:
+                state = _json.load(f)
+        except Exception as e:
+            print(f"Failed to load state: {e}")
+            return False
+        
+        if state.get("version") != "2.0":
+            print(f"Warning: state version {state.get('version')} may not be compatible")
+        
+        # 恢复OEP
+        self.oep = state.get("oep", 0)
+        self._oep_state = state.get("oep_state", "START")
+        self.oep_candidates = state.get("oep_candidates", [])
+        
+        # 恢复模块
+        self.modules = {}
+        for k, v in state.get("modules", {}).items():
+            from .context import ModuleInfo
+            self.modules[k] = ModuleInfo(
+                name=v["name"], base=v["base"], size=v.get("size", 0)
+            )
+        
+        # 恢复导入表
+        self.imports = state.get("imports", {})
+        self.dump_path = state.get("dump_path", "")
+        self.output_path = state.get("output_path", "")
+        
+        # 重新加载 memory_image
+        if self.dump_path and os.path.exists(self.dump_path):
+            with open(self.dump_path, 'rb') as f:
+                self.memory_image = bytearray(f.read())
+        
+        return True
+    
     def summary(self) -> str:
-        """生成摘要"""
         return (
             f"UnpackContext({self.sample_name})\n"
             f"  OEP: 0x{self.oep:x}  state: {self._oep_state}\n"
