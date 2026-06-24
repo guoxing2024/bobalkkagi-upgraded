@@ -25,6 +25,7 @@ from typing import Optional
 
 # Unicorn imports — 现有代码依赖
 from unicorn import Uc, UC_ARCH_X86, UC_MODE_64, UcError, UC_HOOK_INSN, UC_HOOK_CODE
+from unicorn import UC_PROT_READ, UC_PROT_WRITE, UC_PROT_ALL
 from unicorn.x86_const import UC_X86_REG_RAX, UC_X86_REG_RBX, UC_X86_REG_RCX
 from unicorn.x86_const import UC_X86_REG_RDX, UC_X86_REG_RDI, UC_X86_REG_RSI
 from unicorn.x86_const import UC_X86_REG_RSP, UC_X86_REG_RBP, UC_X86_REG_RIP
@@ -245,13 +246,25 @@ class UnicornBackend(IExecutionBackend):
             from .fetch_trap_oep import FetchTrapOEP
             self._fetch_trap = FetchTrapOEP(
                 self_uc, 0x140000000, verbose=self._verbose)
-            # Set .text as RW (not RWX) AFTER PE_Loader has set up the memory
             self._fetch_trap.setup()
-            # Register FETCH_PROT handler
+
+            # Fetch Trap for OEP
             from unicorn import UC_HOOK_MEM_FETCH_PROT, UC_HOOK_MEM_FETCH_UNMAPPED
             self_uc.hook_add(
                 UC_HOOK_MEM_FETCH_UNMAPPED | UC_HOOK_MEM_FETCH_PROT,
                 self._fetch_trap.on_fetch_prot)
+
+            # Silently handle unmapped reads/writes (prevent UC_ERR that kills pipeline)
+            from unicorn import UC_HOOK_MEM_READ_UNMAPPED, UC_HOOK_MEM_WRITE_UNMAPPED
+            def _map_on_demand(uc, access, address, size, value, user_data):
+                page = address & ~0xFFF
+                try:
+                    uc.mem_map(page, 0x1000, UC_PROT_READ | UC_PROT_WRITE)
+                except:
+                    pass
+                return True
+            self_uc.hook_add(UC_HOOK_MEM_READ_UNMAPPED, _map_on_demand)
+            self_uc.hook_add(UC_HOOK_MEM_WRITE_UNMAPPED, _map_on_demand)
 
             return orig_emu_start(self_uc, *args, **kwargs)
 
