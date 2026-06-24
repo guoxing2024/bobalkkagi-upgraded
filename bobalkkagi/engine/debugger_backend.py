@@ -586,6 +586,11 @@ class DebuggerBackend(IExecutionBackend):
 
             print(f"  [DebuggerBackend] Process created: PID={self._process_id}")
 
+            # V5: Pre-launch sanitization — 在 TLS 之前构建干净环境
+            from bobalkkagi.prelaunch import sanitize_process
+            sanitize_process(self._process_handle, self._thread_handle,
+                           self._process_id)
+
             # V5: Manual Inline Hook — 延迟到 LOAD_DLL_DEBUG_EVENT
             # (CREATE_SUSPENDED 时 ntdll 未计入 module list)
             from .manual_hooker import ManualHooker
