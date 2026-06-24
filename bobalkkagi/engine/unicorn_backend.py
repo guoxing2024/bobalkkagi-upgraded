@@ -60,13 +60,20 @@ class UnicornBackend(IExecutionBackend):
 
     def __init__(self, crc_mode: str = "safe", emu_mode: str = 'f', verbose: bool = False):
         self._crc_mode = crc_mode
-        self._emu_mode = emu_mode  # 'f'=fast, 'c'=hook_code, 'b'=hook_block
+        self._emu_mode = emu_mode
         self._verbose = verbose
         self._uc: Optional[Uc] = None
         self._oep: int = 0
         self._ep: int = 0
         self._running: bool = False
         self._pe = None
+
+        # P3: Magicmida memory trap (Unicorn)
+        self._text_base = 0
+        self._text_size = 0
+        self._tls_entries: List[int] = []
+        self._trap_oep: int = 0
+        self._trap_active = False
 
         # P3: Runtime VM entry detection
         self._themida_base = 0
@@ -209,7 +216,12 @@ class UnicornBackend(IExecutionBackend):
 
         print(f"  [UnicornBackend] Hooks installed (mode={self._emu_mode}, crc={self._crc_mode}, crc_patches={crc_patches})")
 
-        # P3: 运行时VM入口检测 — 监控RIP首次进入.themida段
+        # P3: Magicmida memory trap — set .text to NONE, hook FETCH_UNMAPPED
+        self._trap_oep = 0
+        self._tls_entries.clear()
+        self._setup_text_trap()
+
+        # P3: 运行时VM入口检测
         from unicorn import UC_HOOK_CODE as UC_CODE
         self._vm_entry_detected = False
         self._captured_vm_entries = []
@@ -254,7 +266,7 @@ class UnicornBackend(IExecutionBackend):
             print(f"  [UnicornBackend] VM entry hook error: {e}")
 
     def execute(self, ctx) -> ExecutionResult:
-        """执行 Unicorn 模拟"""
+        """Magicmida-style: 内存陷阱 OEP 捕获"""
         if not self._uc:
             return ExecutionResult(success=False, backend=self.display_name,
                                    stage=ExecutionStage.ERROR,
@@ -264,7 +276,16 @@ class UnicornBackend(IExecutionBackend):
         from ..unpacking import PebBase
         start_time = datetime.now()
 
-        # 设置寄存器（模拟 TLS 回调后的入口状态）
+        # 扩大内存映射 — 给 DLL 更多空间，防止 UC_ERR_WRITE_UNMAPPED
+        if GLOBAL_VAR.image_end < GLOBAL_VAR.image_base + 0x2000000:
+            try:
+                extra = GLOBAL_VAR.image_base + 0x2000000 - GLOBAL_VAR.image_end
+                self._uc.mem_map(GLOBAL_VAR.image_end, extra, 7)  # UC_PROT_ALL
+                GLOBAL_VAR.image_end += extra
+            except:
+                pass
+
+        # 寄存器初始化
         self._uc.reg_write(UC_X86_REG_RAX, GLOBAL_VAR.image_base + self._ep)
         self._uc.reg_write(UC_X86_REG_RBX, 0x0)
         self._uc.reg_write(UC_X86_REG_RCX, PebBase)
@@ -274,6 +295,7 @@ class UnicornBackend(IExecutionBackend):
         self._uc.reg_write(UC_X86_REG_EFLAGS, 0x244)
 
         self._running = True
+        self._trap_oep = 0
         oep = 0
         error_msg = ""
 
@@ -281,15 +303,18 @@ class UnicornBackend(IExecutionBackend):
             self._uc.emu_start(GLOBAL_VAR.image_base + self._ep,
                               GLOBAL_VAR.image_end)
         except UcError as e:
-            BobLog.error(f"Unicorn stopped: {e}")
-            oep = self._uc.reg_read(UC_X86_REG_RIP)
-            BobLog.info(f"Find OEP: {oep:x}")
             error_msg = str(e)
+            # Check if we captured OEP via trap
+            if self._trap_oep:
+                oep = self._trap_oep
+                print(f"  [UnicornBackend] ✅ Magicmida trap OEP: 0x{oep:x}")
+            else:
+                oep = self._uc.reg_read(UC_X86_REG_RIP)
+                BobLog.info(f"Find OEP: {oep:x}")
 
         self._running = False
         elapsed = (datetime.now() - start_time).total_seconds()
 
-        # 收集统计
         from .. import api_recorder
         api_calls = len(api_recorder._api_calls) if hasattr(api_recorder, '_api_calls') else 0
         crc_patches = len(getattr(
@@ -308,25 +333,105 @@ class UnicornBackend(IExecutionBackend):
             api_calls=api_calls,
             crc_patches=crc_patches,
             elapsed_seconds=elapsed,
-            error_message=error_msg if not oep else "",
-            diagnosis="",
+            error_message="" if oep else error_msg,
+            diagnosis=(
+                f"Magicmida trap: OEP=0x{oep:x}, API calls={api_calls}, "
+                f"TLS entries={len(self._tls_entries)}"
+            ) if oep else f"Emulation crashed: {error_msg[:80]}",
         )
 
         if oep == 0:
             result.warnings.append("oep_not_found")
-            result.diagnosis = (
-                f"Emulation terminated without capturing OEP. RIP at crash: unknown. "
-                f"Try hook_code mode for deeper per-instruction tracing."
-            )
 
-        # P3: VM entry detection results
         if self._captured_vm_entries:
             result.extra["vm_entries"] = self._captured_vm_entries
-            result.diagnosis += (
-                f" | VM entries captured: {len(self._captured_vm_entries)}"
-            )
 
         return result
+
+    # ===== P3: Magicmida 内存陷阱 (Unicorn) =====
+
+    def _setup_text_trap(self):
+        """设置 .text 段为 UC_PROT_NONE + FETCH_UNMAPPED hook"""
+        if not self._uc:
+            return
+
+        from ..globalValue import GLOBAL_VAR
+        from unicorn import UC_PROT_NONE, UC_HOOK_MEM_FETCH_UNMAPPED
+
+        # 从 section_info 找到 .text 段
+        section_info = GLOBAL_VAR.section_info if hasattr(GLOBAL_VAR, 'section_info') else []
+        for sec in section_info:
+            if len(sec) >= 4:
+                name = sec[0]
+                va = sec[1]
+                size = sec[2]
+                if name in ('.text', 'UPX0', '') or (name == '' and not self._text_base):
+                    self._text_base = va
+                    self._text_size = max(size, 0x1000)
+
+        if not self._text_base:
+            self._text_base = GLOBAL_VAR.image_base + 0x1000
+            self._text_size = 0x10000
+
+        # 设置 .text 为不可访问
+        try:
+            self._uc.mem_protect(self._text_base, self._text_size, UC_PROT_NONE)
+            self._uc.hook_add(UC_HOOK_MEM_FETCH_UNMAPPED, self._on_fetch_text,
+                             None, self._text_base, self._text_base + self._text_size)
+            self._trap_active = True
+            print(f"  [UnicornBackend] 🪤 Magicmida trap: .text @ 0x{self._text_base:x} "
+                  f"({self._text_size} bytes) → PROT_NONE")
+        except Exception as e:
+            print(f"  [UnicornBackend] ⚠ Trap setup failed: {e}")
+
+    def _on_fetch_text(self, uc, access, address, size, value, user_data):
+        """Magicmida: 执行流尝试进入 .text → OEP 或 TLS"""
+        if not self._trap_active:
+            return False
+
+        rsp = uc.reg_read(UC_X86_REG_RSP)
+        rip = uc.reg_read(UC_X86_REG_RIP)
+        is_tls = False
+
+        # TLS 检测: 栈上有异常返回地址 (指向壳段, 非主模块)
+        try:
+            stack = uc.mem_read(rsp, 24)
+            ret_addr = struct.unpack('<Q', stack[0:8])[0]
+            # 如果返回地址在主模块范围内但不在 .text 段 → TLS
+            from ..globalValue import GLOBAL_VAR
+            if GLOBAL_VAR.image_base <= ret_addr < GLOBAL_VAR.image_base + 0x2000000:
+                if not (self._text_base <= ret_addr < self._text_base + self._text_size):
+                    is_tls = True
+            elif ret_addr > 0 and ret_addr < 0x7FFF00000000:
+                is_tls = True
+        except:
+            pass
+
+        if is_tls:
+            self._tls_entries.append(address)
+            # 临时恢复执行 → 单步 → 重新保护
+            uc.mem_protect(address & ~0xFFF, 0x1000, UC_PROT_EXEC | UC_PROT_READ)
+            rip_next = rip
+            try:
+                # 在当前页执行直到离开 (单步模拟)
+                page_end = (address & ~0xFFF) + 0x1000
+                uc.emu_start(rip, min(page_end, address + 0x1000), count=1)
+            except:
+                pass
+            # 恢复保护
+            uc.mem_protect(address & ~0xFFF, 0x1000, UC_PROT_NONE)
+            return True  # 继续执行
+
+        # Not TLS → OEP!
+        self._trap_oep = address
+        self._trap_active = False
+
+        # 恢复整个 .text 段保护
+        from unicorn import UC_PROT_ALL
+        uc.mem_protect(self._text_base, self._text_size, UC_PROT_ALL)
+        print(f"  [UnicornBackend] 🎯 OEP captured @ 0x{address:x} (TLS: {len(self._tls_entries)} skipped)")
+
+        return False  # 让 Unicorn 继续，但 trap 已解除
 
     def dump_memory(self, ctx) -> Optional[bytes]:
         """导出完整内存dump"""

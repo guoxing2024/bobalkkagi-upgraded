@@ -326,6 +326,8 @@ class Pipeline:
                 print(f"  [IATScanner] {len(stubs)} import stubs identified")
                 result["stub_count"] = len(stubs)
                 self._scanned_stubs = stubs
+
+    def _stage_detect(self):
         """阶段4: OEP 检测 + Memory 分析"""
         print(f"\n{'='*60}")
         print(f"  阶段 4/5: OEP检测 + 区域分析")
