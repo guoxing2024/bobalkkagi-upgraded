@@ -18,6 +18,7 @@ def hook_nt_query_info(h_process, h_thread, pid, de_buf=None):
         de_buf = (ctypes.c_byte * 200)()
 
     # Flush events to let Ldr initialize
+    rd = ctypes.c_size_t(0)
     for _ in range(10):
         if k32.WaitForDebugEvent(de_buf, 100):
             raw = bytearray(de_buf[:12])
