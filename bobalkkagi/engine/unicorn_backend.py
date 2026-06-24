@@ -24,7 +24,7 @@ from datetime import datetime
 from typing import Optional
 
 # Unicorn imports — 现有代码依赖
-from unicorn import Uc, UC_ARCH_X86, UC_MODE_64, UcError, UC_HOOK_INSN
+from unicorn import Uc, UC_ARCH_X86, UC_MODE_64, UcError, UC_HOOK_INSN, UC_HOOK_CODE
 from unicorn.x86_const import UC_X86_REG_RAX, UC_X86_REG_RBX, UC_X86_REG_RCX
 from unicorn.x86_const import UC_X86_REG_RDX, UC_X86_REG_RDI, UC_X86_REG_RSI
 from unicorn.x86_const import UC_X86_REG_RSP, UC_X86_REG_RBP, UC_X86_REG_RIP
