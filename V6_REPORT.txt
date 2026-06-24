@@ -1,0 +1,135 @@
+# bobalkkagi-upgraded V6.0 技术总结报告
+
+**日期**: 2026-06-24  
+**样本**: 伦伦软件.exe (Themida 3.x, x64)  
+**目的**: 自动脱壳 + 产出独立可运行 EXE  
+
+---
+
+## 一、架构
+
+双引擎：Unicorn (分析) + Debugger (验证)。最终以 Unicorn 为主线。
+
+### 管道流程
+```
+样本 → Unicorn 模拟 → 12MB dump → OEP 检测 → PE 重建 → IAT 扩展 → EXE
+耗时: 16.5s
+```
+
+---
+
+## 二、反反调试 — 六层尝试
+
+| 层 | 方案 | 结果 |
+|---|------|------|
+| 1 | Debugger + ScyllaHide 注入 | ✅ 注入成功, 进程因 CloseHandle(main_thread) 崩溃。修复后窗口弹出"软件运行环境异常" |
+| 2 | Debugger + Manual Inline Hook (NtQueryInformationProcess) | ✅ Shellcode 正确, 但在 CREATE_SUSPENDED 时 Ldr=0, 无法在 TLS 前注入 |
+| 3 | Debugger + 12 种 BP 拦截 | ✅ 代码完成, ntdll syscall offset 不匹配当前 Windows 版本 |
+| 4 | Unicorn 模式 (默认) | ✅ pipeline 正常完成, 12MB dump, 9 runtime API 调用 |
+| 5 | Unicorn + Syscall 拦截器 | ✅ 4 种反调试 syscall 已拦截, hook_ZwQueryInformationProcess 已存在 |
+| 6 | Unicorn + 用户态 Stub (IsDebuggerPresent) | ✅ Stub 区域分配正确 |
+
+**结论**: 真实调试器路线因 TLS 阶段检测(早于任何用户态 hook)而失效。Unicorn 反调试由现有 hook 系统覆盖。
+
+---
+
+## 三、OEP 检测 — 七种尝试
+
+| 方案 | 方法 | 结果 |
+|------|------|------|
+| 1 | Magicmida PAGE_NOACCESS trap | ❌ Unicorn fast 模式不执行 .text 代码 |
+| 2 | GS:[0x30] 模式扫描 (dump) | ✅ 25 候选, 最近 0x563703 |
+| 3 | OEP Stub Tracer (deep mode) | ❌ UC_HOOK_CODE 太慢 (>249s) |
+| 4 | Cross-Section (.boot→.text 跳转) | ❌ fast 模式不执行 .boot 代码 |
+| 5 | Fetch Trap (.text=RW 不可执行) | ✅ 代码正确, 永不触发 (.text 未解密) |
+| 6 | VirtualProtect hook (拦截 .text 执行权限) | ✅ 正确拦截, 但 VirtualProtect 仅针对 DLL 调用 |
+| 7 | Direct EP + TLS 手动执行 | ❌ TLS 回调数组为空 (样本不使用 TLS 回调) |
+
+**根因**: 样本通过 .boot VM 代码解密 .text，TLS 回调数组为空。Unicorn 的 Direct EP 执行了 7300 万指令但 .text 仍为加密状态。Fetch Trap 设计正确但永不触发。
+
+### OEP stub 反汇编 (0x4ed393)
+```
+mov rax, gs:[0x30]        ← PEB 访问
+cmp rbp, rsi
+jne 0x1404ed52d
+shl rax, 0x20
+xor edx, edx
+push rbp
+mov rbp, rax
+push 0x77fd9272            ← 混淆值
+xor [rsp+8], r8            ← 栈 XOR 解密
+...                         ← 动态计算真实 OEP
+```
+Themida 反篡改存根，通过寄存器动态计算跳转目标。静态扫描无法提取。
+
+---
+
+## 四、IAT 重建
+
+| 来源 | 函数数 | DLL 数 |
+|------|--------|--------|
+| 原始 PE | 4 | 2 |
+| Runtime 记录 | 9 (4 unique) | 6 |
+| 暴力扩展 | 98 | 8 |
+| Manifest | ✅ 生成 .iat.txt |
+| PE 注入 | ⚠ .idata 段正确, pefile 可读, 0xC0000138 (大小写修复中) |
+
+---
+
+## 五、PE 修复
+
+| 组件 | 状态 |
+|------|------|
+| OEP 修正 | ✅ 0x885058→0x563703 |
+| 强制重定位 | ✅ 23 页 36 条 |
+| 资源保留 | ✅ RVA=0x211000 |
+| PE 导入表注入 | ⚠ 见上方 |
+| 产出 EXE | 12.9MB, 双击 0xC0000005 |
+
+0xC0000005 = ACCESS_VIOLATION。OEP stub 读取 GS:[0x30] 在独立进程崩溃(Unicorn 的 Fake PEB 地址无效)。
+
+---
+
+## 六、当前资产
+
+```
+bobalkkagi/
+├── engine/
+│   ├── unicorn_backend.py      ← Unicorn 后端 (FetchTrap/DirectEP/CrossSection/Syscall)
+│   ├── debugger_backend.py     ← Debugger 后端 (ScyllaHide/12-BP/CloseHandle 已修)
+│   ├── scylla_injector.py      ← ScyllaHide DLL 注入
+│   ├── manual_hooker.py        ← NtQueryInformationProcess inline hook
+│   ├── fetch_trap_oep.py       ← .text=RW Fetch Trap OEP
+│   ├── cross_section_oep.py    ← 跨段跳转 OEP
+│   ├── oep_stub_tracer.py      ← OEP Stub 追踪器
+│   ├── syscall_interceptor.py  ← Unicorn syscall 拦截
+│   ├── user_mode_stubber.py    ← 用户态反调试 Stub
+│   ├── phase2_engine.py        ← SEH + 多线程 + OEP (perf 问题)
+│   └── direct_ep.py            ← Direct EP 启动器
+├── iat/
+│   ├── instruction_scanner.py  ← Capstone 指令扫描
+│   └── scylla_scanner.py       ← Scylla 式扫描
+├── prelaunch/
+│   ├── environment_builder.py  ← ProcessSanitizer
+│   ├── early_ntdll_hook.py     ← 早期 ntdll hook
+│   └── observer.py             ← 环境观测器
+├── v6_final.py                 ← OEP 检测 + IAT manifest
+├── phase3_produce.py           ← Phase3 一体化: OEP+IAT+reloc
+├── iat_injector.py             ← PE 导入表重建
+├── oep_detector.py             ← 序言扫描 OEP 检测器
+└── bobalkkagi_cli.py           ← 一键 CLI
+
+bobalkkagi_cli.py -t sample.exe -o output.exe
+```
+
+---
+
+## 七、核心问题 (请教专家)
+
+1. **.text 不解密**: Direct EP 在 .boot 执行 73M 指令, 但 .text 保持加密。此样本不使用 TLS 回调, VirtualProtect 仅对 DLL 调用。解密触发机制是什么？
+
+2. **OEP stub 是反篡改代码**: `mov rax, gs:[0x30]` 后跟 XOR 解密 + 栈操作, 真实 OEP 通过寄存器动态计算。是否有静态/轻量级方法提取跳转目标？
+
+3. **Fetch Trap 永远不触发**: 逻辑正确(.text=RW + FETCH_PROT → OEP)但前提是 .text 被解密后才能执行。是否需要在解密前采取不同策略？
+
+4. **是否有其他样本可供验证**？当前仅测试 1 个 Themida 3.x 样本。
