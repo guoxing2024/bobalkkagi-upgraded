@@ -586,7 +586,13 @@ class DebuggerBackend(IExecutionBackend):
 
             print(f"  [DebuggerBackend] Process created: PID={self._process_id}")
 
-            # V5: ScyllaHide 进程内注入 (CREATE_SUSPENDED, 进程未运行)
+            # V5: Manual Inline Hook — 延迟到 LOAD_DLL_DEBUG_EVENT
+            # (CREATE_SUSPENDED 时 ntdll 未计入 module list)
+            from .manual_hooker import ManualHooker
+            self._manual_hooker = ManualHooker(self._process_handle, self._process_id)
+            print(f"  [DebuggerBackend] ManualHooker prepared (will activate on first DLL load)")
+
+            # V5: ScyllaHide 备选 (ManualHooker 之后)
             if self._hide_debugger:
                 from .scylla_injector import inject_scyllahide
                 if inject_scyllahide(self._process_id):
@@ -749,6 +755,12 @@ class DebuggerBackend(IExecutionBackend):
                 if dll_name:
                     ld = debug_event.u.LoadDll
                     self._loaded_modules[dll_name.lower()] = ld.lpBaseOfDll or 0
+
+                    # V5: Manual Inline Hook 在 ntdll 加载时立即触发
+                    if dll_name.lower() == 'ntdll.dll' and hasattr(self, '_manual_hooker'):
+                        print(f"  [DebuggerBackend] ntdll loaded → activating Inline Hooks")
+                        self._manual_hooker.patch_all()
+                        delattr(self, '_manual_hooker')
                     self._api_calls += 1
                 continue_status = DBG_CONTINUE
 
