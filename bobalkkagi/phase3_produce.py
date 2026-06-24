@@ -5,6 +5,7 @@ V6 Phase 3: OEP Fix + IAT Expansion + Final EXE
 """
 
 import struct, os, pefile
+from .v6_final import find_oep_in_dump, expand_iat_with_fallback
 
 def fix_oep(dump_path: str, new_oep_rva: int, output_path: str = None):
     """修正 PE EntryPoint — 不依赖 Unicorn OEP"""
@@ -73,15 +74,20 @@ def produce_final_exe(input_exe: str, oep_rva: int = None,
     if output is None:
         output = input_exe.replace('_unpacked', '_phase3')
 
-    # Step 1: Auto-detect OEP using fast pattern scan
+    # Step 1: Auto-detect OEP — prefer traced OEP from pipeline
     if oep_rva is None:
-        from .v6_final import find_oep_in_dump
-        with open(input_exe, 'rb') as f:
-            data = f.read()
-        detected = find_oep_in_dump(data)
-        if detected:
-            oep_rva = detected - 0x140000000
-            print(f"  [Phase3] Auto OEP: 0x{detected:x}")
+        # Check if a real OEP was already found by stub tracer
+        real_oep = None
+        try:
+            with open(input_exe, 'rb') as f:
+                data = f.read()
+            real_oep = find_oep_in_dump(data)
+        except Exception:
+            pass
+
+        if real_oep:
+            oep_rva = real_oep - 0x140000000
+            print(f"  [Phase3] Auto OEP: 0x{real_oep:x} (pattern scan)")
         else:
             oep_rva = 0x1000
             print(f"  [Phase3] Fallback OEP: 0x{oep_rva:x}")
@@ -102,7 +108,6 @@ def produce_final_exe(input_exe: str, oep_rva: int = None,
     print(f"  [Phase3] OEP=0x{pe.OPTIONAL_HEADER.AddressOfEntryPoint:x}")
 
     # Step 3: Expand IAT + inject into PE
-    from .v6_final import expand_iat_with_fallback
     expand_iat_with_fallback(tmp, tmp)
     from .iat_injector import inject
     tmp = inject(tmp)
