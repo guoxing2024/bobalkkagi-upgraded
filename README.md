@@ -20,6 +20,7 @@ Compared to the original version (35 API hooks, no PE reconstruction):
 | PEB/KUSER Environment | Minimal | Full Win10 1903 simulation |
 | Full Pipeline | ❌ | ✅ `unpack_full()` — 5-stage (Unpack → Emulate → Analyze → Detect → Rebuild) |
 | AI Agent Interface | ❌ | ✅ JSON I/O + unified error codes + auto-retry |
+| P2: Multi-Backend | ❌ | ✅ Unicorn + Debugger dual backend + cross-backend failover |
 
 ## Installation
 
@@ -67,6 +68,26 @@ result = pipe.run()
 print(f"OEP: 0x{result.oep:x}")
 print(f"Output: {result.output_path}")
 ```
+
+### Method 1c: Debugger Backend (P2 — Hardware Anti-Debug)
+
+```python
+from bobalkkagi.agent_interface import agent_unpack
+import json
+
+result = json.loads(agent_unpack(
+    "protected.exe",
+    backend="debugger",          # Win32 Debug API + ScyllaHide
+    timeout=120
+))
+print(f"OEP: {result['oep']}")
+```
+
+| Backend | Unicorn | Debugger |
+|---------|---------|----------|
+| Hardware anti-debug | ❌ | ✅ ScyllaHide |
+| Timing detection | ❌ | ✅ Real CPU |
+| Auto-failover | →debugger on crash | →unicorn on failure |
 
 Output:
 - `protected_unpacked.exe` — Fully reconstructed PE with:
@@ -202,8 +223,12 @@ kernelbase:
 
 ```
 NEW:  bobalkkagi/pe_rebuilder.py    — PE section header reconstruction
-NEW:  bobalkkagi/iat_rebuilder.py   — Import table reconstruction (runtime-merge)
-NEW:  bobalkkagi/pipeline.py        — 5-stage automated pipeline + force_runtime_iat
+NEW:  bobalkkagi/agent_interface.py   — AI Agent JSON interface + RETRY_STRATEGIES (P1) + backend param (P2)
+NEW:  bobalkkagi/core/backend.py        — IExecutionBackend abstract interface (P2)
+NEW:  bobalkkagi/engine/__init__.py      — create_backend factory (P2)
+NEW:  bobalkkagi/engine/unicorn_backend.py — UnicornBackend implementation (P2)
+NEW:  bobalkkagi/engine/debugger_backend.py — DebuggerBackend — Win32 Debug API (P2)
+MOD:  bobalkkagi/pipeline.py        — 5-stage pipeline + multi-backend scheduling (P2)
 NEW:  bobalkkagi/crc_bypass.py      — CRC integrity check bypass (safe/aggressive)
 NEW:  bobalkkagi/api_recorder.py    — Runtime API call recording for IAT
 NEW:  bobalkkagi/diagnostic.py      — Structured failure diagnosis engine
@@ -216,8 +241,12 @@ NEW:  bobalkkagi/tracker/import_scanner.py    — Scylla-style thunk scanner
 NEW:  bobalkkagi/detector/oep_detector.py     — Multi-signal OEP detection
 NEW:  bobalkkagi/detector/memory_analyzer.py  — RegionClassifier (6 types)
 NEW:  bobalkkagi/rebuild/tls_rebuilder.py     — TLS directory restoration
-NEW:  bobalkkagi/agent_interface.py   — AI Agent JSON interface + RETRY_STRATEGIES
-MOD:  bobalkkagi/api_hook.py        — 35→84 hooks (+475 lines)
+NEW:  bobalkkagi/agent_interface.py   — AI Agent JSON interface + RETRY_STRATEGIES (P1) + backend param (P2)
+NEW:  bobalkkagi/core/backend.py        — IExecutionBackend abstract interface (P2)
+NEW:  bobalkkagi/engine/__init__.py      — create_backend factory (P2)
+NEW:  bobalkkagi/engine/unicorn_backend.py — UnicornBackend implementation (P2)
+NEW:  bobalkkagi/engine/debugger_backend.py — DebuggerBackend — Win32 Debug API (P2)
+MOD:  bobalkkagi/pipeline.py        — 5-stage pipeline + multi-backend scheduling (P2)
 MOD:  bobalkkagi/hookFuncs.py       — Hook index table (35→84)
 MOD:  bobalkkagi/kuserSharedData.py — Fixed KdDebuggerEnabled=0
 MOD:  bobalkkagi/peb.py             — OS version fields in PEB

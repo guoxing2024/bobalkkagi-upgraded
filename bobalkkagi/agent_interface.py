@@ -41,6 +41,10 @@ class ErrorCode:
     ERR_REBUILD_FAILED = "rebuild_failed"
     # CRC
     ERR_CRC_CRASH = "crc_crash"
+    # 调试器
+    ERR_DEBUGGER_FAILED = "debugger_failed"
+    ERR_DEBUGGER_TIMEOUT = "debugger_timeout"
+    ERR_DEBUGGER_ACCESS_DENIED = "debugger_access_denied"
     # 通用
     ERR_UNKNOWN = "unknown_error"
     ERR_TIMEOUT = "timeout"
@@ -63,6 +67,9 @@ ERROR_DESCRIPTIONS = {
     ErrorCode.ERR_IAT_NO_IMPORTS: "No import functions found",
     ErrorCode.ERR_REBUILD_FAILED: "PE rebuild failed",
     ErrorCode.ERR_CRC_CRASH: "CRC check bypass caused crash",
+    ErrorCode.ERR_DEBUGGER_FAILED: "Debugger backend failed (process creation/execution error)",
+    ErrorCode.ERR_DEBUGGER_TIMEOUT: "Debugger backend timed out during execution",
+    ErrorCode.ERR_DEBUGGER_ACCESS_DENIED: "Debugger access denied (likely requires admin privileges)",
     ErrorCode.ERR_UNKNOWN: "Unknown error occurred",
     ErrorCode.ERR_TIMEOUT: "Overall pipeline timed out",
 }
@@ -77,15 +84,18 @@ NEXT_STEP_SUGGESTIONS = {
     ErrorCode.ERR_UNMAPPED_MEMORY: "Memory range exceeded. Try reducing ImageBaseEnd",
     ErrorCode.WARN_LOW_IMPORT_COUNT: "Run with --force-runtime-iat=True to generate IAT from runtime API recording (800+ observed calls)",
     ErrorCode.WARN_PARTIAL_CRC_SCAN: "CRC scan was incomplete. Try --crc-mode=aggressive for full section scan",
+    ErrorCode.ERR_DEBUGGER_FAILED: "Debugger execution failed — falling back to Unicorn emulation backend",
+    ErrorCode.ERR_DEBUGGER_ACCESS_DENIED: "Run as Administrator to use the debugger backend, or use --backend=unicorn",
 }
 
 # ============================================================
-# P1: 自动重试策略引擎
+# P1+P2: 自动重试策略引擎 (含跨后端降级)
 # ============================================================
 RETRY_STRATEGIES: Dict[str, list] = {
     "oep_not_found": [
         {"mode": "hook_code", "reason": "Slower per-instruction tracing may reveal hidden OEP"},
         {"crc_mode": "aggressive", "reason": "Aggressive CRC bypass may unblock OEP execution path"},
+        {"backend": "debugger", "reason": "Unicorn missed OEP — switching to real-process debugger for hardware-level tracing"},
     ],
     "iat_no_imports": [
         {"force_runtime_iat": True, "reason": "Original PE import table is obfuscated. Switch to runtime recording."},
@@ -93,6 +103,7 @@ RETRY_STRATEGIES: Dict[str, list] = {
     "emulation_crash": [
         {"crc_mode": "off", "reason": "CRC patches may be causing the crash. Disabling bypass."},
         {"mode": "hook_code", "crc_mode": "safe", "reason": "Retry with safe CRC bypass and per-instruction tracing."},
+        {"backend": "debugger", "reason": "Unicorn keeps crashing — switching to real-process debugger to bypass emulation issues"},
     ],
     "crc_crash": [
         {"crc_mode": "safe", "reason": "Rolling back to safe CRC bypass mode."},
@@ -100,6 +111,15 @@ RETRY_STRATEGIES: Dict[str, list] = {
     ],
     "low_import_count": [
         {"force_runtime_iat": True, "reason": "Low import count detected. Forcing runtime IAT reconstruction."},
+    ],
+    # P2: 跨后端降级 — unicorn失败时自动切debugger
+    "debugger_failed": [
+        {"backend": "unicorn", "crc_mode": "aggressive",
+         "reason": "Debugger unavailable — falling back to aggressive Unicorn emulation"},
+    ],
+    "debugger_access_denied": [
+        {"backend": "unicorn", "crc_mode": "safe",
+         "reason": "Debugger requires admin — falling back to Unicorn emulation with safe CRC"},
     ],
 }
 
@@ -193,6 +213,7 @@ def agent_unpack(
     timeout: int = 600,
     snapshot_every_stage: bool = False,
     force_runtime_iat: bool = False,
+    backend: str = "unicorn",
 ) -> str:
     """
     AI Agent 标准工具接口。
@@ -206,6 +227,9 @@ def agent_unpack(
         snapshot_every_stage: Save context state after each stage
         force_runtime_iat: If True, ignore original PE imports and use
             only runtime API recording (solves "low import count" issue)
+        backend: "unicorn" (default) | "debugger"
+            - "unicorn": 纯Unicorn模拟，对抗无硬件反调试的样本
+            - "debugger": Win32 Debug API真实进程，对抗硬件/时序反调试
     
     Returns:
         JSON string with AgentResponse
@@ -228,7 +252,9 @@ def agent_unpack(
         # Build pipeline
         pipe = Pipeline(file_path, dll_path,
                        force_runtime_iat=force_runtime_iat,
-                       crc_mode=crc_mode)
+                       crc_mode=crc_mode,
+                       backend=backend,
+                       emu_mode=mode)
         
         # Execute
         result = pipe.run()
@@ -311,8 +337,15 @@ def agent_unpack(
             error_code = ErrorCode.ERR_TIMEOUT
         elif "unmapped" in err_str or "uc_err" in err_str:
             error_code = ErrorCode.ERR_UNMAPPED_MEMORY
-        elif "crc" in err_str:
-            error_code = ErrorCode.ERR_CRC_CRASH
+        # ============================================================
+        # P2: 调试器特殊错误码映射
+        # ============================================================
+        elif "debugger" in err_str or "access" in err_str:
+            error_code = ErrorCode.ERR_DEBUGGER_FAILED
+            if "access" in err_str.lower():
+                error_code = ErrorCode.ERR_DEBUGGER_ACCESS_DENIED
+            elif "timeout" in err_str:
+                error_code = ErrorCode.ERR_DEBUGGER_TIMEOUT
         
         resp = AgentResponse.from_error(
             error_code, "pipeline",
@@ -342,13 +375,16 @@ def agent_unpack(
                     adjusted_mode = strategy.get("mode", mode)
                     adjusted_crc = strategy.get("crc_mode", crc_mode)
                     adjusted_force_iat = strategy.get("force_runtime_iat", force_runtime_iat)
+                    adjusted_backend = strategy.get("backend", backend)  # P2: cross-backend retry
                     reason = strategy.get("reason", "auto-retry")
                     
-                    # Build retry pipeline with adjusted parameters
+                    # Build retry pipeline with adjusted parameters (P2: +backend)
                     retry_pipe = Pipeline(
                         file_path, dll_path,
                         force_runtime_iat=adjusted_force_iat,
-                        crc_mode=adjusted_crc
+                        crc_mode=adjusted_crc,
+                        backend=adjusted_backend,
+                        emu_mode=adjusted_mode,
                     )
                     retry_result = retry_pipe.run()
                     retry_elapsed = (datetime.now() - start_time).total_seconds()

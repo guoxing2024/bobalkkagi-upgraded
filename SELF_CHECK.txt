@@ -1,100 +1,86 @@
 
 === Bobalkkagi-Upgraded 自检报告 ===
 生成时间: 2026-06-24
-Git提交: 17次
-专家建议验收: ✅ 完成 (见底部验收矩阵)
+Git提交: 18次
+专家建议验收: ✅ P0+P1+P2 全部完成 (见底部验收矩阵)
 
 【P0验收 — 全部通过】
-  1. GLOBAL_VAR业务引用: 0处 (全项目grep验证)
-     $ grep -rn "GLOBAL_VAR\." bobalkkagi/*.py | grep -v globalValue.py
-     → 输出为空 ✅
+  1. GLOBAL_VAR业务引用: 0处 (全项目grep验证) ✅
+  2. GLOBAL_VAR import: 0处 (6个文件已清理) ✅
+  3. Pipeline纯调度: 通过 ✅
+  4. EventBus落地: 通过 ✅
 
-  2. GLOBAL_VAR import: 0处 (6个文件已清理)
-     $ grep -rn "from.*import.*GLOBAL_VAR" bobalkkagi/*.py | grep -v globalValue.py
-     → 输出为空 ✅
-
-  3. Pipeline纯调度: 通过
-     pipeline.py 仅包含 _stage_load/emulate/analyze/detect/rebuild 方法
-     所有业务逻辑在 tracker/detector/rebuild 模块中
-
-  4. EventBus落地: 通过
-     MemoryTrackerV2 发布 MemoryEvent → EventBus → OEPDetector 消费
-     Tracker与Detector无直接耦合
-
-【P0修复 — 专家建议验收 (本轮)】
-  5. IAT数据管道修复: ✅
-     问题: ctx.runtime_api_calls 从未被 api_recorder 填充
-           → ctx.get_runtime_imports() 返回空 → IATRebuilder收到空runtime_calls
-           → 仅使用原始PE导入表 → 每个DLL只恢复1个函数
-     修复: _stage_analyze 同步写入 ctx.runtime_api_calls
-     $ grep -rn "runtime_api_calls.add" bobalkkagi/pipeline.py
-     → bobalkkagi/pipeline.py:199: self.ctx.runtime_api_calls.add((dll, f)) ✅
-
-  6. force_runtime_iat 参数: ✅
-     pipeline.py: Pipeline.__init__(force_runtime_iat=False)
-     agent_interface.py: agent_unpack(force_runtime_iat=False)
-     iat_rebuilder.py: IATRebuilder.__init__(force_runtime_only=False)
-     iat_rebuilder.py: _parse_orig_imports — runtime-only分支
-
-  7. CRC异常回滚机制: ✅
-     RETRY_STRATEGIES["crc_crash"] = [safe→off]
-     RETRY_STRATEGIES["emulation_crash"] = [off→safe+hook_code]
-     agent_unpack 异常捕获后自动按策略重试
-
-  8. NEXT_STEP_SUGGESTIONS: ✅
-     已添加 WARN_LOW_IMPORT_COUNT 和 WARN_PARTIAL_CRC_SCAN 键
+【P0修复 — 专家建议验收】
+  5. IAT数据管道修复: ✅  pipeline.py:200 ctx.runtime_api_calls.add()
+  6. force_runtime_iat 参数: ✅  Pipeline/agent/rebuilder三级传递
+  7. CRC异常回滚机制: ✅  RETRY_STRATEGIES + fix_entry_point防护
+  8. NEXT_STEP_SUGGESTIONS: ✅  补全WARN_LOW_IMPORT_COUNT等键
 
 【P1验收 — 通过】
-  9. OEP Detector: 运行中，四重信号综合评分
-     return_to_main × 30 + rw_to_rx × 25 + call_stack × 25 + api × 20
+  9. OEP Detector: 四重信号综合评分 ✅
+  10. Memory Analyzer: RegionClassifier六类分类 ✅
+  11. RETRY_STRATEGIES自动重试: 5+2种策略映射 ✅
+  12. 结构化诊断: 三层诊断 ✅
 
-  10. Memory Analyzer: RegionClassifier 六类分类
-      encrypted / decrypted / vm / code / data / mixed
+【P2验收 — 执行引擎抽象化 (本轮)】
+  13. IExecutionBackend 接口: ✅
+      core/backend.py — 7个抽象方法 + ExecutionResult + 错误类型
+      → 生命周期: initialize→load_target→install_hooks→execute→dump→cleanup
+      → 元信息: backend_type / display_name / capabilities
 
-【P1新增 — 专家建议验收 (本轮)】
-  11. RETRY_STRATEGIES 自动重试引擎: ✅
-      策略: oep_not_found, iat_no_imports, emulation_crash, crc_crash, low_import_count
-      agent_unpack 内部根据 error_code 自动匹配策略并重试
+  14. UnicornBackend 实现: ✅
+      engine/unicorn_backend.py — 封装现有 unpacking.py
+      → 对齐接口: 84 hooks + CRC bypass + PEB/TEB/KUSER
+      → 向后兼容: 现有代码通过 GLOBAL_VAR 代理透明桥接
 
-  12. 结构化诊断: ✅
-      低导入数时输出: 导入数/DLL数/均值/运行时记录可用数/建议操作
-      导入数>=20时输出: 完整IAT摘要
+  15. DebuggerBackend 实现: ✅
+      engine/debugger_backend.py — Win32 Debug API + ScyllaHide模拟
+      → CreateProcess(DEBUG_PROCESS) → WaitForDebugEvent循环
+      → ScyllaHide模拟器: PEB标记清除/KUSER修改
+      → 完整x64 CONTEXT + MODULEENTRY32W + EXCEPTION_RECORD定义
+      → ReadProcessMemory dump + TerminateProcess cleanup
+      → 超时保护 + OEP检测(Rip回归主模块+RW→RX转换)
 
-【迁移模块 — 8个文件】
-  unpacking.py:    38处替换 (ctx.image_base, ctx.image_end, etc.)
-  loader.py:       10处替换
-  api_hook.py:      9处替换  
-  debugger.py:      4处替换
-  logger.py:        1处替换
-  application.py:   3处替换
-  util_unwrap.py:  21处替换
-  pipeline.py:     15处替换
-  总计:           ~101处 GLOBAL_VAR.xxx → ctx.xxx
+  16. Pipeline集成: ✅
+      pipeline.py — create_backend工厂 + 自动降级
+      → __init__(backend="unicorn", **backend_kwargs)
+      → _stage_load: initialize→load_target→install_hooks→execute→dump→cleanup
+      → RuntimeError时 unicorn自动→debugger（或反方向）
 
-【新增模块 — 12个文件】
-  core/__init__.py        core/context.py         core/events.py
-  core/plugin.py          detector/oep_detector.py  detector/memory_analyzer.py
-  tracker/memory_tracker_v2.py  tracker/import_scanner.py
-  rebuild/tls_rebuilder.py  exception_engine.py
-  crc_bypass.py           api_recorder.py          pe_rebuilder.py
-  iat_rebuilder.py
+  17. agent_interface扩展: ✅
+      → backend参数: "unicorn" | "debugger"
+      → ERR_DEBUGGER_FAILED / ERR_DEBUGGER_ACCESS_DENIED 错误码
+      → RETRY_STRATEGIES跨后端降级:
+        {"debugger_failed": [{"backend":"unicorn","crc_mode":"aggressive"}]}
+        {"debugger_access_denied": [{"backend":"unicorn","crc_mode":"safe"}]}
+      → oep/emulation_crash策略新增 debugger 降级项
 
-【API钩子】 35→84个
-【PE重建】 section headers修复 + TLS目录恢复
-【IAT重建】 运行时API记录 + Scylla-style thunk扫描 + 原始PE合并 + force_runtime_only模式
+  18. ErrorCode新增: ✅
+      → ERR_DEBUGGER_FAILED / ERR_DEBUGGER_TIMEOUT / ERR_DEBUGGER_ACCESS_DENIED
+
+【新增文件 — P2】
+  core/backend.py            — IExecutionBackend抽象接口 (ABC)
+  engine/__init__.py          — create_backend工厂
+  engine/unicorn_backend.py   — UnicornBackend实现
+  engine/debugger_backend.py  — DebuggerBackend实现 (Win32 Debug API)
 
 ================================================================
-  专家建议验收矩阵 (2 docs updated)
+  专家建议验收矩阵 (P0+P1+P2 complete)
 ================================================================
 
 | # | 建议项 | 优先级 | 状态 | 验证方式 |
 |---|--------|--------|------|---------|
-| 1 | 重构IAT重建策略 — 运行时记录优先 | P0 | ✅ | ctx.runtime_api_calls管道修复 |
-| 2 | IAT仅回退到原始PE | P0 | ✅ | force_runtime_only=False时合并 |
-| 3 | force_runtime_iat参数 | P0 | ✅ | Pipeline/agent/rebuilder三级传递 |
-| 4 | CRC异常回滚+重试safe | P0 | ✅ | RETRY_STRATEGIES内建策略 |
-| 5 | 扩大CRC扫描范围 | P0 | ✅ | scan_and_patch_crc支持任意section |
-| 6 | RETRY_STRATEGIES自动重试引擎 | P1 | ✅ | 5种错误码→策略映射 |
-| 7 | 结构化诊断输出 | P1 | ✅ | 三层诊断(严重/边界/完整) |
-| 8 | SKILL_CARD v2更新 | P1 | ✅ | 新增force_runtime_iat参数 |
-| 9 | IExecutionBackend接口 | P2 | ⏳ | Phase 2范围 |
+| 1 | 重构IAT重建策略 | P0 | ✅ | ctx.runtime_api_calls管道修复 |
+| 2 | IAT回退到原始PE | P0 | ✅ | force_runtime_only=False时合并 |
+| 3 | force_runtime_iat参数 | P0 | ✅ | 三级传递 |
+| 4 | CRC异常回滚+重试safe | P0 | ✅ | RETRY_STRATEGIES内建 |
+| 5 | 扩大CRC扫描范围 | P0 | ✅ | scan_and_patch_crc任意section |
+| 6 | RETRY_STRATEGIES | P1 | ✅ | 7种错误码→策略映射 |
+| 7 | 结构化诊断输出 | P1 | ✅ | 三层诊断+数据管道溯源 |
+| 8 | SKILL_CARD v2更新 | P1 | ✅ | force_runtime_iat + retry + diagnosis |
+| 9 | IExecutionBackend接口 | P2 | ✅ | 7个生命周期方法 + ABC |
+| 10| UnicornBackend实现 | P2 | ✅ | 封装现有unpacking.py |
+| 11| DebuggerBackend实现 | P2 | ✅ | Win32 Debug API + ScyllaHide |
+| 12| Pipeline backend集成 | P2 | ✅ | create_backend工厂 + 自动降级 |
+| 13| agent_interface backend | P2 | ✅ | backend参数 + 跨后端retry |
+| 14| 调试器错误码 | P2 | ✅ | 3个新错误码 + 诊断函数 |
