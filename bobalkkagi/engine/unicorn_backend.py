@@ -241,14 +241,17 @@ class UnicornBackend(IExecutionBackend):
             # from .phase2_engine import install_phase2_engine
             # self._phase2 = install_phase2_engine(...)
 
-            # V6: Cross-section OEP — hook .boot section (TLS execution area)
-            from .cross_section_oep import CrossSectionOEP
-            self._cross_oep = CrossSectionOEP(
+            # V6: Fetch Trap — .text = RW, catch first execute → OEP
+            from .fetch_trap_oep import FetchTrapOEP
+            self._fetch_trap = FetchTrapOEP(
                 self_uc, 0x140000000, verbose=self._verbose)
-            # Hook .boot section (VA 0x885000-0xc5e000, 3.8MB)
-            # TLS callbacks execute here → eventually jump to .text
-            self_uc.hook_add(UC_HOOK_CODE, self._cross_oep.on_code, None,
-                           0x140885000, 0x140c5e000)
+            # Set .text as RW (not RWX) AFTER PE_Loader has set up the memory
+            self._fetch_trap.setup()
+            # Register FETCH_PROT handler
+            from unicorn import UC_HOOK_MEM_FETCH_PROT, UC_HOOK_MEM_FETCH_UNMAPPED
+            self_uc.hook_add(
+                UC_HOOK_MEM_FETCH_UNMAPPED | UC_HOOK_MEM_FETCH_PROT,
+                self._fetch_trap.on_fetch_prot)
 
             return orig_emu_start(self_uc, *args, **kwargs)
 
@@ -275,7 +278,8 @@ class UnicornBackend(IExecutionBackend):
             backend=self.display_name,
             stage=ExecutionStage.DONE,
             dump_data=None,
-            oep=getattr(self._cross_oep, 'real_oep', None) or oep or self._ep,
+            oep=(getattr(self, '_fetch_trap', None) and
+                 getattr(self._fetch_trap, 'real_oep', None)) or oep or self._ep,
             image_base=GLOBAL_VAR.image_base,
             image_end=GLOBAL_VAR.image_end,
             api_calls=api_calls,
