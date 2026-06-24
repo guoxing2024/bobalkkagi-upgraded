@@ -66,11 +66,12 @@ class Phase2Engine:
         # 1. UC_HOOK_MEM_UNMAPPED for SEH simulation
         self.uc.hook_add(UC_HOOK_MEM_UNMAPPED, self._on_mem_unmapped)
 
-        # 2. UC_HOOK_CODE for OEP tracking — only on .boot/.themida sections (fast)
-        code_start = self._boot_start or self._themida_start or self._text_start
-        code_end = max(self._boot_end, self._themida_end, self._text_end or 0)
-        if code_start and code_end:
-            self.uc.hook_add(UC_HOOK_CODE, self._on_code, None, code_start, code_end)
+        # 2. UC_HOOK_CODE for OEP tracking — on all module code sections
+        for start, end in [(self._boot_start, self._boot_end),
+                            (self._themida_start, self._themida_end),
+                            (self._text_start, self._text_end)]:
+            if start and end and end > start:
+                self.uc.hook_add(UC_HOOK_CODE, self._on_code, None, start, end)
 
         # 3. UC_HOOK_INTR for breakpoint/interrupt handling
         self.uc.hook_add(UC_HOOK_INTR, self._on_interrupt)
