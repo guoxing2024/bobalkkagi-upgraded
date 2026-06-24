@@ -114,18 +114,17 @@ def hook_nt_query_info(h_process, h_thread, pid, de_buf=None):
         return False
 
     # Allocate executable memory in target process for shellcode
-    cave = k32.VirtualAllocEx(h_process, None, 0x1000,
-                               0x3000,  # MEM_COMMIT|MEM_RESERVE
-                               0x40)    # PAGE_EXECUTE_READWRITE
-    if not cave:
+    cave_ptr = k32.VirtualAllocEx(h_process, None, 0x1000,
+                                   0x3000,  # MEM_COMMIT|MEM_RESERVE
+                                   0x40)    # PAGE_EXECUTE_READWRITE
+    if not cave_ptr:
         print(f"  [EarlyHook] VirtualAllocEx failed")
         return False
+    cave = cave_ptr if isinstance(cave_ptr, int) else (cave_ptr.value or 0)
+    if not cave:
+        return False
     target_addr = ntdll_base + func_rva
-
-    # Save original first 14 bytes
-    orig_buf = (ctypes.c_char * 14)()
-    k32.ReadProcessMemory(h_process, ctypes.c_void_p(target_addr), orig_buf, 14, ctypes.byref(rd))
-    orig_14 = bytes(orig_buf)
+    print(f"  [EarlyHook] Shellcode @ 0x{cave:x}")
 
     # Build shellcode using bytearray
     sc = bytearray()
@@ -151,10 +150,8 @@ def hook_nt_query_info(h_process, h_thread, pid, de_buf=None):
     # handle_1e @ byte 58-63
     sc += bytes([0xB8, 0x53, 0x03, 0x00, 0xC0, 0xC3])
 
-    # Write shellcode
-    old_prot = ctypes.c_uint32()
-    k32.VirtualProtectEx(h_process, ctypes.c_void_p(cave), len(sc) + 0x100, 0x40, ctypes.byref(old_prot))
-    k32.WriteProcessMemory(h_process, ctypes.c_void_p(cave), bytes(sc), len(sc), None)
+    # Write shellcode (use cave_ptr, not cave int)
+    k32.WriteProcessMemory(h_process, cave_ptr, bytes(sc), len(sc), None)
 
     # 5-byte relative JMP (xa: E9 rel32) — ntdll syscall wrapper is only ~8 bytes
     rel32 = (cave - (target_addr + 5)) & 0xFFFFFFFF
