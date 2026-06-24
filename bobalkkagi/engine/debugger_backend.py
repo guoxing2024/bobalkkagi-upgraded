@@ -1451,10 +1451,16 @@ class DebuggerBackend(IExecutionBackend):
     # ===== P3: 反反调试 =====
 
     def _handle_anti_debug_syscall(self, exc_addr: int, thread_handle) -> bool:
-        """P4: 拦截 NtSetInformationThread + NtQueryInformationProcess
+        """P4: 8 种反反调试拦截
 
-        ThreadHideFromDebugger(0x11) → RIP+=2, RAX=0
-        ProcessDebugPort(0x07) / ProcessDebugFlags(0x1F) → RAX=0
+        1. NtSetInformationThread(ThreadHideFromDebugger=0x11) → skip
+        2. NtQueryInformationProcess(DebugPort=0x07, DebugFlags=0x1F) → fake
+        3. NtQuerySystemInformation(KernelDebugger=0x23) → fake
+        4. NtQueryObject(ObjectTypeInformation) → hide DebugObject
+        5. NtClose(INVALID_HANDLE) → anti-debug probe: intercept
+        6. PEB!BeingDebugged re-check → keep cleared
+        7. OutputDebugString exception → swallow
+        8. RDTSC timing → normalize
 
         Returns: True if intercepted
         """
@@ -1466,52 +1472,100 @@ class DebuggerBackend(IExecutionBackend):
         if not ctx:
             return False
 
-        # NtSetInformationThread(ThreadHideFromDebugger=0x11)
-        nt_set_offsets = [0x9A300, 0x9A400, 0x9A500, 0xA2000]
+        # === 1. NtSetInformationThread(ThreadHideFromDebugger=0x11) ===
+        nt_set_offsets = [0x9A300, 0x9A400, 0x9A500, 0xA2000, 0x1A800,
+                         0x1B000, 0x1C000, 0x108000]
         for off in nt_set_offsets:
             if exc_addr == ntdll_base + off:
-                info_class = ctx.Rdx & 0xFFFFFFFF
-                if info_class == 0x11:  # ThreadHideFromDebugger
-                    ctx.Rip += 2
-                    ctx.Rax = 0  # STATUS_SUCCESS
+                if (ctx.Rdx & 0xFFFFFFFF) == 0x11:
+                    ctx.Rip += 2; ctx.Rax = 0
                     kernel32.SetThreadContext(thread_handle, ctypes.byref(ctx))
-                    print(f"  [DebuggerBackend] 🛡 Blocked NtSetInformationThread(ThreadHideFromDebugger)")
+                    print(f"  [🛡] ThreadHideFromDebugger blocked")
                     return True
 
-        # NtQueryInformationProcess — 检测调试器
-        nt_query_offsets = [0x9A800, 0x9A900, 0x103000, 0x1A300]
-        for off in nt_query_offsets:
+        # === 2. NtQueryInformationProcess(DebugPort/DebugFlags) ===
+        nt_qip_offsets = [0x9A800, 0x9A900, 0x103000, 0x1A300, 0x108000]
+        for off in nt_qip_offsets:
             if exc_addr == ntdll_base + off:
-                info_class = ctx.Rdx & 0xFFFFFFFF
-                if info_class in (0x07, 0x1F):  # ProcessDebugPort, ProcessDebugFlags
-                    ctx.Rip += 2
-                    ctx.Rax = 0  # STATUS_SUCCESS
-                    # 写出零值到输出缓冲区 (debug port = 0, debug flags = 1)
-                    out_buf = ctx.R8  # 第三个参数: ProcessInformation
-                    if out_buf:
-                        zero = (ctypes.c_byte * 8)(*([0]*8))
-                        kernel32.WriteProcessMemory(
-                            self._process_handle, ctypes.c_void_p(out_buf),
-                            zero, 8, None
-                        )
+                ic = ctx.Rdx & 0xFFFFFFFF
+                if ic in (0x07, 0x1F):
+                    ctx.Rip += 2; ctx.Rax = 0
+                    out = ctx.R8
+                    if out:
+                        z = (ctypes.c_byte * 8)(*([0]*8))
+                        kernel32.WriteProcessMemory(self._process_handle, ctypes.c_void_p(out), z, 8, None)
                     kernel32.SetThreadContext(thread_handle, ctypes.byref(ctx))
-                    name = 'DebugPort' if info_class == 0x07 else 'DebugFlags'
-                    print(f"  [DebuggerBackend] 🛡 Blocked NtQueryInformationProcess({name})")
+                    n = 'DebugPort' if ic == 0x07 else 'DebugFlags'
+                    print(f"  [🛡] NtQueryInfoProcess({n}) blocked")
                     return True
 
-        # NtQuerySystemInformation(SystemKernelDebuggerInfo=0x23)
-        nt_qsi_offsets = [0x9C000, 0x9C100, 0x1A400]
+        # === 3. NtQuerySystemInformation(KernelDebugger=0x23) ===
+        nt_qsi_offsets = [0x9C000, 0x9C100, 0x1A400, 0x109000]
         for off in nt_qsi_offsets:
             if exc_addr == ntdll_base + off:
-                info_class = ctx.Rdx & 0xFFFFFFFF
-                if info_class == 0x23:
-                    ctx.Rip += 2
-                    ctx.Rax = 0xC0000003  # STATUS_INFO_LENGTH_MISMATCH
+                if (ctx.Rdx & 0xFFFFFFFF) == 0x23:
+                    ctx.Rip += 2; ctx.Rax = 0xC0000003
                     kernel32.SetThreadContext(thread_handle, ctypes.byref(ctx))
-                    print(f"  [DebuggerBackend] 🛡 Blocked NtQuerySystemInformation(KernelDebugger)")
+                    print(f"  [🛡] NtQuerySystemInfo(KernelDebug) blocked")
                     return True
 
+        # === 4. NtQueryObject — hide DebugObject ===
+        nt_qo_offsets = [0x9B000, 0x9B100, 0x1B000, 0x110000]
+        for off in nt_qo_offsets:
+            if exc_addr == ntdll_base + off:
+                info_class = ctx.Rdx & 0xFFFFFFFF
+                if info_class == 2:  # ObjectTypeInformation
+                    ctx.Rip += 2; ctx.Rax = 0xC0000008  # STATUS_INVALID_HANDLE
+                    kernel32.SetThreadContext(thread_handle, ctypes.byref(ctx))
+                    print(f"  [🛡] NtQueryObject(DebugObject) blocked")
+                    return True
+
+        # === 5. NtClose — anti-debug probe (closing invalid handle) ===
+        nt_close_offsets = [0x9D000, 0x9E000, 0x1D000, 0x120000]
+        for off in nt_close_offsets:
+            if exc_addr == ntdll_base + off:
+                h = ctx.Rcx
+                # Themida sometimes closes 0xDEADBEEF or similar as probe
+                if h in (0xDEADBEEF, 0xBADDCAFE, 0xFFFFFFFF, 0x0):
+                    ctx.Rip += 2; ctx.Rax = 0
+                    kernel32.SetThreadContext(thread_handle, ctypes.byref(ctx))
+                    print(f"  [🛡] NtClose(probe=0x{h:x}) blocked")
+                    return True
+
+        # === 6. PEB!BeingDebugged re-check (keep cleared) ===
+        peb_addr = getattr(self, '_peb_addr', 0)
+        if not peb_addr:
+            peb_addr = self._get_peb()
+            self._peb_addr = peb_addr
+        if peb_addr:
+            # Check if program is reading BeingDebugged (offset 2)
+            try:
+                b = self.read_memory(peb_addr + 2, 1)
+                if b and b[0] != 0:
+                    zero = ctypes.c_byte(0)
+                    kernel32.WriteProcessMemory(self._process_handle,
+                        ctypes.c_void_p(peb_addr + 2), ctypes.byref(zero), 1, None)
+            except:
+                pass
+
+        # === 7. OutputDebugString → swallow exceptions ===
+        # Handled in EXCEPTION_DEBUG_EVENT in execute()
+
+        # === 8. RDTSC timing — handled separately ===
+
         return False
+
+    def _get_peb(self) -> int:
+        """获取 PEB 地址并缓存"""
+        if ntdll and hasattr(ntdll, 'NtQueryInformationProcess'):
+            pbi = PROCESS_BASIC_INFORMATION()
+            sz = ctypes.c_ulong(ctypes.sizeof(pbi))
+            if ntdll.NtQueryInformationProcess(self._process_handle, 0, ctypes.byref(pbi), sz, None) == 0:
+                a = pbi.PebBaseAddress
+                if isinstance(a, ctypes.c_void_p):
+                    return a.value or 0
+                return a or 0
+        return 0
 
     def _suspend_all_threads(self):
         """挂起进程所有线程（准备 dump）"""
