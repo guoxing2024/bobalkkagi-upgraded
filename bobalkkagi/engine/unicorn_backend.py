@@ -33,7 +33,7 @@ from unicorn.x86_const import UC_X86_REG_R11, UC_X86_REG_R12, UC_X86_REG_R13
 from unicorn.x86_const import UC_X86_REG_R14, UC_X86_REG_R15, UC_X86_REG_EFLAGS
 from unicorn.x86_const import UC_X86_REG_CS, UC_X86_REG_GS_BASE
 
-from .backend import (
+from ..core.backend import (
     IExecutionBackend, BackendType, ExecutionStage,
     ExecutionResult, BackendExecutionError
 )
@@ -120,12 +120,15 @@ class UnicornBackend(IExecutionBackend):
             return False
 
         from ..loader import PE_Loader
-        from ..unpacking import setUpStructure, StackLimit, StackBase
+        from ..unpacking import setUpStructure
         from ..globalValue import GLOBAL_VAR
+        from ..constValue import StackLimit, StackBase
+
+        # Unicorn memory protection constants
+        UC_PROT_ALL = 7  # UC_PROT_READ | UC_PROT_WRITE | UC_PROT_EXEC
 
         # 栈空间
-        self._uc.mem_map(StackLimit, StackBase - StackLimit,
-                        getattr(UC_X86_REG_RAX, '__class__', type('', (), {})) or 7)
+        self._uc.mem_map(StackLimit, StackBase - StackLimit, UC_PROT_ALL)
 
         try:
             # 用现有的 PE_Loader（依赖 GLOBAL_VAR 代理，已指向 ctx）
@@ -139,8 +142,7 @@ class UnicornBackend(IExecutionBackend):
         setUpStructure(self._uc)
 
         # Hook 区域
-        self._uc.mem_map(GLOBAL_VAR.hook_region, 0x1000,
-                        getattr(UC_X86_REG_RAX, '__class__', type('', (), {})) or 7)
+        self._uc.mem_map(GLOBAL_VAR.hook_region, 0x1000, UC_PROT_ALL)
 
         print(f"  [UnicornBackend] Target loaded: EP=0x{self._ep:x}")
         return True
@@ -163,12 +165,7 @@ class UnicornBackend(IExecutionBackend):
         InsertHookFlag(self._uc)
         InvHookFuncDict()
 
-        # 写保护的 hook
-        self._uc.hook_add(
-            getattr(self._uc, '_hook', None) or 0,  # will use actual type below
-            0, 0, 0  # placeholder
-        )
-        # --- 实际代码中 UC_HOOK_MEM_WRITE_PROT 等是 Unicorn 常量 ---
+        # Install Unicorn hooks
         from unicorn import UC_HOOK_MEM_WRITE_PROT, UC_HOOK_CODE, UC_HOOK_BLOCK
 
         self._uc.hook_add(UC_HOOK_MEM_WRITE_PROT, hook_mem_read_unmapped)

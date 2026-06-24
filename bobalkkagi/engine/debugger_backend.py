@@ -187,6 +187,33 @@ class EXIT_PROCESS_DEBUG_INFO(ctypes.Structure):
     ]
 
 
+class EXIT_THREAD_DEBUG_INFO(ctypes.Structure):
+    _fields_ = [
+        ("dwExitCode", wintypes.DWORD),
+    ]
+
+
+class UNLOAD_DLL_DEBUG_INFO(ctypes.Structure):
+    _fields_ = [
+        ("lpBaseOfDll", ctypes.c_void_p),
+    ]
+
+
+class OUTPUT_DEBUG_STRING_INFO(ctypes.Structure):
+    _fields_ = [
+        ("lpDebugStringData", wintypes.LPSTR),
+        ("fUnicode", wintypes.WORD),
+        ("nDebugStringLength", wintypes.WORD),
+    ]
+
+
+class RIP_INFO(ctypes.Structure):
+    _fields_ = [
+        ("dwError", wintypes.DWORD),
+        ("dwType", wintypes.DWORD),
+    ]
+
+
 class DEBUG_EVENT_U(ctypes.Union):
     _fields_ = [
         ("Exception", EXCEPTION_DEBUG_INFO),
@@ -195,9 +222,9 @@ class DEBUG_EVENT_U(ctypes.Union):
         ("ExitThread", EXIT_THREAD_DEBUG_INFO),
         ("ExitProcess", EXIT_PROCESS_DEBUG_INFO),
         ("LoadDll", LOAD_DLL_DEBUG_INFO),
-        ("UnloadDll", LOAD_DLL_DEBUG_INFO),
-        ("DebugString", OUTPUT_DEBUG_STRING_EVENT),
-        ("RipInfo", RIP_EVENT),
+        ("UnloadDll", UNLOAD_DLL_DEBUG_INFO),
+        ("DebugString", OUTPUT_DEBUG_STRING_INFO),
+        ("RipInfo", RIP_INFO),
     ]
 
 
