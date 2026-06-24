@@ -1021,7 +1021,209 @@ class DebuggerBackend(IExecutionBackend):
         )
         self._trap_active = False
 
-    # ===== P3: Magicmida 指令扫描 IAT =====
+    # ===== P4: 混合 IAT 重建 v2 (RealProcess 代码扫描) =====
+
+    def scan_iat_from_code(self, oep: int, scan_size: int = 0x10000) -> dict:
+        """
+        P4: 在真实进程中扫描 OEP 附近的代码，提取 call/jmp [mem] IAT 槽位。
+
+        与 api_recorder 互补：api_recorder 捕获运行时实际调用的 API，
+        此方法扫描静态代码中的所有导入引用。
+
+        Returns: {slot_addr: (dll_name, func_name)}
+        """
+        result = {}
+        if not self._process_handle or not oep:
+            return result
+
+        try:
+            from capstone import Cs, CS_ARCH_X86, CS_MODE_64
+            md = Cs(CS_ARCH_X86, CS_MODE_64)
+            md.detail = True
+
+            # 从 OEP 读取代码
+            code = self.read_memory(oep, scan_size)
+            if not code or len(code) < 16:
+                return result
+
+            for insn in md.disasm(code, oep):
+                # call [mem] / jmp [mem]
+                if insn.mnemonic in ('call', 'jmp'):
+                    slot_addr = self._get_mem_target(insn)
+                    if slot_addr and slot_addr > 0x1000:
+                        # 从 IAT slot 读取真实的 API 地址
+                        api_addr = self._read_qword(slot_addr)
+                        if api_addr and api_addr > 0x10000:
+                            dll_func = self._resolve_api_addr(api_addr)
+                            if dll_func:
+                                result[slot_addr] = dll_func
+        except ImportError:
+            pass
+        except Exception as e:
+            print(f"  [IATScanner] code scan error: {e}")
+
+        print(f"  [IATScanner v2] code scan: {len(result)} slots from OEP")
+        return result
+
+    def _get_mem_target(self, capstone_insn) -> int:
+        """计算 call/jmp [mem] 的目标地址"""
+        try:
+            for op in capstone_insn.operands:
+                if op.type == 3:  # MEM
+                    # call [rip+disp] → addr = insn.addr + insn.size + disp
+                    return capstone_insn.address + capstone_insn.size + op.mem.disp
+        except:
+            pass
+        return 0
+
+    def _read_qword(self, addr: int) -> int:
+        """从进程内存读取 8 字节"""
+        try:
+            buf = self.read_memory(addr, 8)
+            if len(buf) >= 8:
+                return struct.unpack('<Q', buf)[0]
+        except:
+            pass
+        return 0
+
+    def _resolve_api_addr(self, api_addr: int) -> Optional[tuple]:
+        """解析 API 地址 → (dll_name, func_name)"""
+        for dll_name, dll_base in sorted(self._loaded_modules.items()):
+            dll_size = 0x200000
+            if dll_base <= api_addr < dll_base + dll_size:
+                func_name = self._lookup_export_name(dll_name, dll_base, api_addr)
+                if func_name:
+                    return (dll_name, func_name)
+        return None
+
+    def _lookup_export_name(self, dll_name: str, dll_base: int, api_addr: int) -> Optional[str]:
+        """从 DLL 导出表查找函数名"""
+        try:
+            rva = api_addr - dll_base
+            pe_buf = self.read_memory(dll_base, 0x1000)
+            if len(pe_buf) < 0x40:
+                return None
+            pe_off = struct.unpack_from('<I', pe_buf, 0x3C)[0]
+            oh = pe_off + 24
+            magic = struct.unpack_from('<H', pe_buf, oh)[0]
+            if magic == 0x20b:
+                exp_rva = struct.unpack_from('<I', pe_buf, oh + 112)[0]
+                exp_sz  = struct.unpack_from('<I', pe_buf, oh + 116)[0]
+            else:
+                exp_rva = struct.unpack_from('<I', pe_buf, oh + 96)[0]
+                exp_sz  = struct.unpack_from('<I', pe_buf, oh + 100)[0]
+            if exp_rva == 0 or exp_sz == 0:
+                return None
+
+            exp = self.read_memory(dll_base + exp_rva, min(exp_sz, 0x4000))
+            if len(exp) < 40:
+                return None
+            num_funcs = struct.unpack_from('<I', exp, 20)[0]
+            num_names = struct.unpack_from('<I', exp, 24)[0]
+            addr_rva = struct.unpack_from('<I', exp, 28)[0]
+            name_rva = struct.unpack_from('<I', exp, 32)[0]
+            ord_rva  = struct.unpack_from('<I', exp, 36)[0]
+
+            # ordinals → RVA mapping
+            ord_to_rva = {}
+            for i in range(min(num_funcs, 5000)):
+                rv = struct.unpack_from('<I', self.read_memory(dll_base + addr_rva + i*4, 4), 0)[0] if self.read_memory(dll_base + addr_rva + i*4, 4) else 0
+                # Can't read each entry individually - too slow. Approximate.
+                pass
+
+            # Binary search for rva in func addresses
+            for i in range(min(num_funcs, 2000)):
+                func_rva_buf = self.read_memory(dll_base + addr_rva + i*4, 4)
+                if len(func_rva_buf) < 4:
+                    continue
+                fr = struct.unpack('<I', func_rva_buf)[0]
+                if fr == rva:
+                    # Look up name via ordinal table
+                    for j in range(min(num_names, 2000)):
+                        ob = self.read_memory(dll_base + ord_rva + j*2, 2)
+                        if len(ob) < 2:
+                            continue
+                        if struct.unpack('<H', ob)[0] == i:
+                            nb = self.read_memory(dll_base + name_rva + j*4, 4)
+                            if len(nb) >= 4:
+                                nr = struct.unpack('<I', nb)[0]
+                                nd = self.read_memory(dll_base + nr, 128)
+                                if nd:
+                                    nz = nd.find(b'\x00')
+                                    if nz > 0:
+                                        return nd[:nz].decode('ascii', errors='replace')
+                            break
+                    break
+        except:
+            pass
+        return None
+
+    def merge_iat_with_hooks(self, code_scan: dict, runtime_calls: dict) -> dict:
+        """
+        P4: 合并代码扫描 + 运行时 hook 数据 → 完整 IAT。
+
+        code_scan: {addr: (dll, func)} from scan_iat_from_code
+        runtime_calls: {dll: [func, ...]} from api_recorder
+        Returns: {dll: [func, ...]} merged
+        """
+        merged = {}
+        for dll, funcs in runtime_calls.items():
+            merged.setdefault(dll.lower(), set()).update(f for f in funcs if f != '__load__')
+        for _, (dll, func) in code_scan.items():
+            merged.setdefault(dll.lower(), set()).add(func)
+        return {d: sorted(f) for d, f in merged.items()}
+
+    def build_fallback_iat(self, min_funcs: int = 20) -> dict:
+        """
+        P4: 暴力回退 — 扫描 KERNEL32 和 USER32 的常用导出函数。
+
+        当代码扫描 + runtime 合并后函数数 < min_funcs 时触发。
+        """
+        essential_dlls = ['kernel32.dll', 'user32.dll', 'ntdll.dll',
+                         'advapi32.dll', 'gdi32.dll', 'shell32.dll']
+        fallback = {}
+        for dll_name in essential_dlls:
+            if dll_name in self._loaded_modules:
+                base = self._loaded_modules[dll_name]
+                funcs = self._scan_essential_exports(dll_name, base)
+                if funcs:
+                    fallback[dll_name] = funcs
+        return fallback
+
+    def _scan_essential_exports(self, dll_name: str, dll_base: int, max_funcs: int = 200) -> List[str]:
+        """扫描 DLL 的前 N 个命名导出函数"""
+        funcs = []
+        try:
+            pe_buf = self.read_memory(dll_base, 0x1000)
+            pe_off = struct.unpack_from('<I', pe_buf, 0x3C)[0]
+            oh = pe_off + 24
+            magic = struct.unpack_from('<H', pe_buf, oh)[0]
+            if magic == 0x20b:
+                exp_rva = struct.unpack_from('<I', pe_buf, oh+112)[0]
+                exp_sz = struct.unpack_from('<I', pe_buf, oh+116)[0]
+            else:
+                exp_rva = struct.unpack_from('<I', pe_buf, oh+96)[0]
+                exp_sz = struct.unpack_from('<I', pe_buf, oh+100)[0]
+            if exp_rva == 0:
+                return funcs
+
+            exp = self.read_memory(dll_base + exp_rva, min(exp_sz, 0x4000))
+            num_names = struct.unpack_from('<I', exp, 24)[0]
+            name_rva = struct.unpack_from('<I', exp, 32)[0]
+
+            for i in range(min(num_names, max_funcs)):
+                nb = self.read_memory(dll_base + name_rva + i*4, 4)
+                if len(nb) < 4:
+                    continue
+                nr = struct.unpack('<I', nb)[0]
+                nd = self.read_memory(dll_base + nr, 128)
+                if nd:
+                    nz = nd.find(b'\x00')
+                    if nz > 0:
+                        funcs.append(nd[:nz].decode('ascii', errors='replace'))
+        except:
+            pass
+        return funcs
 
     def _scan_iat_from_oep(self):
         """Magicmida: 从 OEP 扫描 CALL [rip] / JMP [rip] 提取 IAT"""
