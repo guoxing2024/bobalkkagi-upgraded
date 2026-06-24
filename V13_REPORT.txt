@@ -1,0 +1,87 @@
+# bobalkkagi-upgraded V13.0 最终报告
+
+**日期**: 2026-06-25  
+**样本**: 伦伦软件.exe (Themida 3.x, x64)  
+
+---
+
+## 全部里程碑
+
+```
+V6:  ✅ 处于 VM Runtime
+V7:  ✅ 未进入 Native
+V8:  ✅ 修正 — VM 在遍历, 非吸收
+V9:  ✅ PEB/TEB 无明显问题
+V10: ✅ VIP 倒序字节码遍历
+V11: ✅ VIP 遍历完成 → 新状态
+V12: ✅ VIP 多阶段状态机
+V13: ✅ 377 阶段循环 — 含 PEB 读取
+```
+
+---
+
+## V13 核心发现
+
+### Execution Destination (1000 VIP events, 12s)
+
+```
+377 phase transitions:
+  boot → other → boot → other → themida → ... REPEATING
+
+VIP 值包括:
+  0x140885058 (EP) — 多次回到入口
+  0x140213000 (.themida base)
+  0xbcb5f39, 0x400, 0x50cc67 (计算值)
+  0xff20000000000000 (PebBase) — VM 读取 PEB!
+```
+
+### VirtualProtect 调用
+
+```
+总计: 0 次
+.text: 0 次
+.themida: 0 次
+其他: 0 次
+```
+
+---
+
+## 关键结论
+
+1. **VM 是多轮迭代 bootstrap** — 不是单次遍历, 反复循环
+2. **VM 读取 PEB** — 证实环境依赖 (VIP=0xff20000000000000)
+3. **每次迭代经 boot/compute/themida** — 复杂状态机
+4. **.text 解密不是当前阶段任务** — bootstrap 阶段不涉及 .text VirtualProtect
+5. **专家假设已证实** — Phase C 最终跳转点在循环中, 未到 .text
+
+---
+
+## 三阶段状态机详情
+
+| 阶段 | VIP 范围 | 含义 |
+|------|----------|------|
+| boot | 0x140885000-0x140885210 | 字节码解释 |
+| compute | 0x55, 0x257, 0xbcb5f39... | 内部计算 |
+| themida | 0x140213000-0x140528014 | 数据表处理 |
+
+---
+
+## 专家三种情况评估
+
+| 情况 | 概率 | 证据 |
+|------|------|------|
+| 多级 VM (VM→VM→Native) | 高 | 377 轮循环, 多阶段 |
+| 解密到新区域 | 中 | VirtualAlloc 0 次 |
+| 动态代码→匿名页 | 低 | 未观察到新页 |
+
+---
+
+## 已冻结
+
+OEP / IAT / PE / 资源 / 导入表
+
+---
+
+## 下一步
+
+若继续: 追踪 PEB 读取后的决策分支 — VM 是否因 PEB 值不满足而循环
