@@ -21,12 +21,11 @@ def hook_nt_query_info(h_process, h_thread, pid, de_buf=None):
     rd = ctypes.c_size_t(0)
     for _ in range(10):
         if k32.WaitForDebugEvent(de_buf, 100):
-            raw = bytearray(de_buf[:12])
-            db = bytes(raw)
-            k32.ContinueDebugEvent(
-                struct.unpack_from('<I', db, 4)[0],
-                struct.unpack_from('<I', db, 8)[0],
-                0x00010002)
+            # Use ctypes cast to avoid bytearray range issue
+            class _DE(ctypes.Structure):
+                _fields_ = [("code", ctypes.c_uint32), ("pid", ctypes.c_uint32), ("tid", ctypes.c_uint32)]
+            ev = ctypes.cast(de_buf, ctypes.POINTER(_DE)).contents
+            k32.ContinueDebugEvent(ev.pid, ev.tid, 0x00010002)
 
     # PEB -> Ldr
     pbi = PROCESS_BASIC_INFORMATION()
