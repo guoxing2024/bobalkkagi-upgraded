@@ -133,9 +133,11 @@ def hook_nt_query_info(h_process, h_thread, pid, de_buf=None):
         0x81, 0xFA, 0x1E, 0x00, 0x00, 0x00,  # 16-21: cmp edx, 0x1E
         0x74, 0x22,                           # 22-23: je +34 -> handle_1e (byte 58)
     ])
-    # jmp [rip+0] -> target_addr+14 (bytes 24-37)
+    # 5-byte JMP at function entry → passthrough jumps to target_addr+5
+    jmp_back_addr = target_addr + 5
+    # jmp [rip+0] -> target_addr+5 (bytes 24-37)
     sc += b'\xff\x25\x00\x00\x00\x00'
-    sc += struct.pack('<Q', target_addr + 14)
+    sc += struct.pack('<Q', jmp_back_addr)
     # handle_07 @ byte 38-47
     sc += bytes([0x49, 0xC7, 0x00, 0x00, 0x00, 0x00, 0x00, 0x31, 0xC0, 0xC3])
     # handle_1f @ byte 48-57
@@ -148,10 +150,11 @@ def hook_nt_query_info(h_process, h_thread, pid, de_buf=None):
     k32.VirtualProtectEx(h_process, ctypes.c_void_p(cave), len(sc) + 0x100, 0x40, ctypes.byref(old_prot))
     k32.WriteProcessMemory(h_process, ctypes.c_void_p(cave), bytes(sc), len(sc), None)
 
-    # JMP cave at function entry
-    jmp_code = b'\xff\x25\x00\x00\x00\x00' + struct.pack('<Q', cave)
-    k32.VirtualProtectEx(h_process, ctypes.c_void_p(target_addr), 14, 0x40, ctypes.byref(old_prot))
-    k32.WriteProcessMemory(h_process, ctypes.c_void_p(target_addr), jmp_code, 14, None)
+    # 5-byte relative JMP (xa: E9 rel32) — ntdll syscall wrapper is only ~8 bytes
+    rel32 = (cave - (target_addr + 5)) & 0xFFFFFFFF
+    jmp_code = b'\\xe9' + struct.pack('<I', rel32)
+    k32.VirtualProtectEx(h_process, ctypes.c_void_p(target_addr), 5, 0x40, ctypes.byref(old_prot))
+    k32.WriteProcessMemory(h_process, ctypes.c_void_p(target_addr), jmp_code, 5, None)
 
     print(f"  [EarlyHook] Hooked: 0x{target_addr:x} -> cave 0x{cave:x}")
     return True
