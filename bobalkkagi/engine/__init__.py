@@ -10,11 +10,12 @@ from ..core.backend import (
 )
 from .unicorn_backend import UnicornBackend
 from .debugger_backend import DebuggerBackend
+from .hybrid_backend import HybridBackend
 
 __all__ = [
     'IExecutionBackend', 'BackendType', 'ExecutionStage',
     'ExecutionResult', 'BackendExecutionError', 'BackendNotAvailableError',
-    'UnicornBackend', 'DebuggerBackend',
+    'UnicornBackend', 'DebuggerBackend', 'HybridBackend',
     'create_backend',
 ]
 
@@ -56,7 +57,12 @@ def create_backend(backend_type: str, **kwargs) -> IExecutionBackend:
         return backend
 
     elif bt == "hybrid":
-        raise NotImplementedError("Hybrid backend is planned for a future phase")
+        return HybridBackend(
+            crc_mode=kwargs.get('crc_mode', 'safe'),
+            emu_mode=kwargs.get('emu_mode', 'f'),
+            debugger_timeout=kwargs.get('debugger_timeout', 60),
+            hide_debugger=kwargs.get('hide_debugger', True),
+        )
 
     else:
         raise ValueError(
