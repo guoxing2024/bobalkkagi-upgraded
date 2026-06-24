@@ -236,8 +236,20 @@ class UnicornBackend(IExecutionBackend):
             # V6 Task 3: Install user-mode anti-debug stubs
             from .user_mode_stubber import install_user_mode_stubs
             stubber = install_user_mode_stubs(self_uc, verbose=self._verbose)
-            if self._verbose:
-                print(f"  [UnicornBackend] User-mode stubs installed")
+
+            # V6 Phase 2: SEH + Multi-thread + OEP capture
+            from .phase2_engine import install_phase2_engine
+            from ..globalValue import GLOBAL_VAR, DLL_SETTING
+            sec_info = {
+                'text_start': 0x140001000,
+                'text_size': 0x1a3550,
+                'boot_start': 0x140885000,
+                'boot_size': 0x3d9000,
+                'themida_start': 0x140213000,
+                'themida_size': 0x672000,
+            }
+            self._phase2 = install_phase2_engine(
+                self_uc, 0x140000000, verbose=self._verbose, sections=sec_info)
 
             return orig_emu_start(self_uc, *args, **kwargs)
 
