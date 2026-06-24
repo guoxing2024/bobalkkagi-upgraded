@@ -24,7 +24,7 @@ from datetime import datetime
 from typing import Optional
 
 # Unicorn imports — 现有代码依赖
-from unicorn import Uc, UC_ARCH_X86, UC_MODE_64, UcError
+from unicorn import Uc, UC_ARCH_X86, UC_MODE_64, UcError, UC_HOOK_INSN
 from unicorn.x86_const import UC_X86_REG_RAX, UC_X86_REG_RBX, UC_X86_REG_RCX
 from unicorn.x86_const import UC_X86_REG_RDX, UC_X86_REG_RDI, UC_X86_REG_RSI
 from unicorn.x86_const import UC_X86_REG_RSP, UC_X86_REG_RBP, UC_X86_REG_RIP
@@ -220,6 +220,21 @@ class UnicornBackend(IExecutionBackend):
 
         up_mod.hook_code = tracked_hook_code
         up_mod.hook_api = tracked_hook_api
+
+        # V6: Syscall interceptor — monkey-patch Uc.emu_start to install hook
+        import unicorn as uc_mod
+        from unicorn.x86_const import UC_X86_INS_SYSCALL
+        from .syscall_interceptor import SyscallInterceptor
+        orig_emu_start = uc_mod.Uc.emu_start
+
+        def patched_emu_start(self_uc, *args, **kwargs):
+            # Install syscall interceptor on every UC engine
+            interceptor = SyscallInterceptor(self_uc, verbose=self._verbose)
+            self_uc.hook_add(UC_HOOK_INSN, interceptor._on_syscall,
+                           None, 1, 0, UC_X86_INS_SYSCALL)
+            return orig_emu_start(self_uc, *args, **kwargs)
+
+        uc_mod.Uc.emu_start = patched_emu_start
         try:
             dump_data, oep = unpack(ctx.sample_path, self._verbose, inner_mode, 't')
         except Exception as e:
