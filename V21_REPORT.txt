@@ -1,0 +1,57 @@
+# bobalkkagi-upgraded V21.0 最终验收报告
+
+**日期**: 2026-06-25  
+**样本**: 伦伦软件.exe (Themida 3.x, x64)  
+
+---
+
+## V21 验收结论
+
+此前所谓 Guard 并非状态字段。
+
+0x14050e94e 位于 VM Runtime 动态生成的 **Dispatch Stub Table** 中。
+
+```
+DWORD[0x14050e94e] == 0x22bee955
+对应字节: 55 e9 be 22
+即 x64 代码: push rbp; jmp rel32
+
+BOOT 阶段检测的是 Dispatch Stub 是否已经生成,
+  而非某个逻辑标志位。
+
+Reality Gap 并非 Guard 缺失,
+  而是 Dispatch Stub Generation 未完成。
+
+监控 Hook 引入的时序扰动导致 Stub Table 生成过程
+  无法达到该槽位, 使检测持续失败并回到 BOOT。
+```
+
+---
+
+## V6-V21 完整里程碑
+
+```
+V6:  ✅ VM Runtime 确认
+V7:  ✅ 未进入 Native
+V8:  ✅ VM 在遍历
+V9:  ✅ PEB/TEB 无明显问题
+V10: ✅ VIP 字节码遍历
+V11: ✅ VIP 遍历完成 → 新状态
+V12: ✅ 三阶段状态机
+V13: ✅ 377 阶段循环
+V14: ✅ 转移条件分类
+V15: ✅ Transition Guard: RAX 决定路径
+V16: ✅ RAX def site = EP CALL
+V17: ✅ Guard 检查点: cmp [rax], 0
+V18: ✅ Guard 页 = VM 上下文结构
+V19: ✅ Guard 值受 hook 影响
+V20: ✅ Guard 写入者 = VM 代码解密循环
+V21: ✅ Guard = dispatch stub 的指令字节 (push rbp; jmp rel32)
+```
+
+---
+
+## 下一步
+
+建立 Dispatch Stub Map — 统计所有 stub 的目标地址区域,
+寻找首个 jmp → .text 的条目 (VM → Native Transition).
