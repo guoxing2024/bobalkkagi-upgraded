@@ -1325,3 +1325,90 @@ def hook_LoadResource(uc, log, regs):
     log.warning(f"HOOK_API_CALL : LoadResource")
     uc.reg_write(UC_X86_REG_RAX, 0x0)
     ret(uc, REGS.rsp)
+
+# ----- Themidie2 兼容: 反调试补充 hook (84+) -----
+
+def hook_FindWindowW(uc, log, regs):
+    """FindWindowW - 返回NULL（未找到调试器窗口）"""
+    set_register(regs)
+    log.warning(f"HOOK_API_CALL : FindWindowW, class=0x{REGS.rcx:x}, title=0x{REGS.rdx:x}")
+    uc.reg_write(UC_X86_REG_RAX, 0x0)
+    ret(uc, REGS.rsp)
+
+def hook_FindWindowA(uc, log, regs):
+    """FindWindowA - 返回NULL"""
+    set_register(regs)
+    log.warning(f"HOOK_API_CALL : FindWindowA, class=0x{REGS.rcx:x}, title=0x{REGS.rdx:x}")
+    uc.reg_write(UC_X86_REG_RAX, 0x0)
+    ret(uc, REGS.rsp)
+
+def hook_Process32NextW(uc, log, regs):
+    """Process32NextW - 返回FALSE（枚举结束）"""
+    set_register(regs)
+    log.warning(f"HOOK_API_CALL : Process32NextW, handle=0x{REGS.rcx:x}")
+    uc.reg_write(UC_X86_REG_RAX, 0x0)
+    uc.reg_write(UC_X86_REG_ERR, 0x12)  # ERROR_NO_MORE_FILES
+    ret(uc, REGS.rsp)
+
+def hook_RegOpenKeyExW(uc, log, regs):
+    """RegOpenKeyExW - 返回ERROR_FILE_NOT_FOUND"""
+    set_register(regs)
+    log.warning(f"HOOK_API_CALL : RegOpenKeyExW, key=0x{REGS.rcx:x}, subkey=0x{REGS.rdx:x}")
+    uc.reg_write(UC_X86_REG_RAX, 0x2)  # ERROR_FILE_NOT_FOUND
+    ret(uc, REGS.rsp)
+
+def hook_RegQueryValueExW(uc, log, regs):
+    """RegQueryValueExW - 返回ERROR_FILE_NOT_FOUND"""
+    set_register(regs)
+    log.warning(f"HOOK_API_CALL : RegQueryValueExW, key=0x{REGS.rcx:x}, value=0x{REGS.rdx:x}")
+    uc.reg_write(UC_X86_REG_RAX, 0x2)  # ERROR_FILE_NOT_FOUND
+    ret(uc, REGS.rsp)
+
+def hook_LoadLibraryExW(uc, log, regs):
+    """LoadLibraryExW - 模拟LoadLibraryA行为"""
+    set_register(regs)
+    log.warning(f"HOOK_API_CALL : LoadLibraryExW, path=0x{REGS.rcx:x}, flags=0x{REGS.r8:x}")
+    if REGS.rcx:
+        try:
+            name = bytes(uc.mem_read(REGS.rcx, 260)).split(b'\x00')[0].decode('utf-16-le', errors='ignore')
+            log.warning(f"  DLL name: {name}")
+        except:
+            pass
+    # Return NULL to let callers handle
+    uc.reg_write(UC_X86_REG_RAX, 0x0)
+    ret(uc, REGS.rsp)
+
+def hook_FindFirstFileExW(uc, log, regs):
+    """FindFirstFileExW - 返回INVALID_HANDLE_VALUE"""
+    set_register(regs)
+    log.warning(f"HOOK_API_CALL : FindFirstFileExW, path=0x{REGS.rcx:x}")
+    uc.reg_write(UC_X86_REG_RAX, -1)  # INVALID_HANDLE_VALUE
+    ret(uc, REGS.rsp)
+
+def hook_SHGetFileInfoA(uc, log, regs):
+    """SHGetFileInfoA - 返回0"""
+    set_register(regs)
+    log.warning(f"HOOK_API_CALL : SHGetFileInfoA")
+    uc.reg_write(UC_X86_REG_RAX, 0x0)
+    ret(uc, REGS.rsp)
+
+def hook_SHGetFileInfoW(uc, log, regs):
+    """SHGetFileInfoW - 返回0"""
+    set_register(regs)
+    log.warning(f"HOOK_API_CALL : SHGetFileInfoW")
+    uc.reg_write(UC_X86_REG_RAX, 0x0)
+    ret(uc, REGS.rsp)
+
+def hook_ExtractIconW(uc, log, regs):
+    """ExtractIconW - 返回NULL"""
+    set_register(regs)
+    log.warning(f"HOOK_API_CALL : ExtractIconW")
+    uc.reg_write(UC_X86_REG_RAX, 0x0)
+    ret(uc, REGS.rsp)
+
+def hook_ExtractIconExW(uc, log, regs):
+    """ExtractIconExW - 返回0"""
+    set_register(regs)
+    log.warning(f"HOOK_API_CALL : ExtractIconExW")
+    uc.reg_write(UC_X86_REG_RAX, 0x0)
+    ret(uc, REGS.rsp)

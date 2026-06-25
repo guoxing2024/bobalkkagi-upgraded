@@ -106,4 +106,17 @@ HookFuncs={
     "ntdll.dll_RtlGetVersion" : 81,
     "ntdll.dll_ZwSetContextThread" : 82,
     "ntdll.dll_ZwGetContextThread" : 83,
+    
+    # === Themidie2 兼容: 反调试补充 hook (84+) ===
+    "user32.dll_FindWindowW" : 84,
+    "user32.dll_FindWindowA" : 85,
+    "kernel32.dll_Process32NextW" : 86,
+    "kernelbase.dll_RegOpenKeyExW" : 87,
+    "kernelbase.dll_RegQueryValueExW" : 88,
+    "kernelbase.dll_LoadLibraryExW" : 89,
+    "kernelbase.dll_FindFirstFileExW" : 90,
+    "shell32.dll_SHGetFileInfoA" : 91,
+    "shell32.dll_SHGetFileInfoW" : 92,
+    "shell32.dll_ExtractIconW" : 93,
+    "shell32.dll_ExtractIconExW" : 94,
 }
